@@ -1,6 +1,6 @@
 # buycoin-trader Operations Guide (English, Detailed)
 
-Document version: `2026-02-13`
+Document version: `2026-02-14`
 Code path: `./` (project root)
 
 ## 0. Purpose
@@ -34,6 +34,8 @@ BITHUMB_SECRET_KEY=your_secret_key
 node src/cli/index.js status --json
 node src/cli/index.js health --json
 node src/cli/index.js markets --symbol BTC_KRW --json
+node src/cli/index.js order chance --symbol BTC_KRW --json
+node src/cli/index.js strategy run --name rsi --symbol BTC_KRW --dry-run --json
 ```
 
 ### 1.4 Place a paper order
@@ -69,6 +71,8 @@ OpenClaw mode (`OPENCLAW_AGENT=true`) bypasses `--confirm YES`.
 - Stored domains:
   - settings (paper/kill-switch)
   - orders/orderEvents/fills
+  - balancesSnapshot
+  - dailyPnlBaseline
   - riskEvents
   - agentAudit
 - Concurrency safety:
@@ -88,6 +92,28 @@ OpenClaw mode (`OPENCLAW_AGENT=true`) bypasses `--confirm YES`.
   - buy side: `market.bid.min_total`
   - sell side: `market.ask.min_total`
 - Effective minimum = `max(config minimum, exchange minimum)`.
+
+### 2.5 Daily PnL baseline and loss-limit context
+- Before each live order, risk context attempts private account snapshot fetch.
+- Current KRW equity is estimated from:
+  - KRW cash (`balance + locked`)
+  - non-KRW holdings valued by `avgBuyPrice` when `unitCurrency=KRW`
+- Baseline per trade date:
+  - use `TRADER_INITIAL_CAPITAL_KRW` if set and valid
+  - otherwise use first observed equity of the day
+- Computed value: `dailyRealizedPnlKrw = currentEquityKrw - baselineEquityKrw`
+- If private account fetch fails, latest `balancesSnapshot` is used as fallback.
+
+### 2.6 RSI strategy execution
+- Strategy name: `rsi`
+- Entry point: `strategy run --name rsi`
+- Signal rules:
+  - `BUY` when RSI <= oversold
+  - `SELL` when RSI >= overbought
+  - otherwise `HOLD`
+- Order behavior:
+  - `--dry-run`: signal only, no order
+  - non-dry-run: market buy only when signal is `BUY`
 
 ## 3. Project Layout
 
@@ -146,6 +172,7 @@ OpenClaw mode (`OPENCLAW_AGENT=true`) bypasses `--confirm YES`.
 | `RISK_MIN_ORDER_NOTIONAL_BY_SYMBOL` | No | `""` | per-symbol minimum override (`USDT_KRW:1000,BTC_KRW:7000`) |
 | `RISK_MAX_ORDER_NOTIONAL_KRW` | No | `300000` | maximum order notional |
 | `RISK_DAILY_LOSS_LIMIT_KRW` | No | `500000` | daily loss cap |
+| `TRADER_INITIAL_CAPITAL_KRW` | No | `""` | optional daily-PnL baseline capital |
 | `RISK_AI_MAX_ORDER_NOTIONAL_KRW` | No | `100000` | max order notional for `--auto-symbol` orders |
 | `RISK_AI_MAX_ORDERS_PER_WINDOW` | No | `3` | max number of `--auto-symbol` orders per window |
 | `RISK_AI_ORDER_COUNT_WINDOW_SEC` | No | `60` | window size (sec) for AI order count cap |
@@ -153,7 +180,17 @@ OpenClaw mode (`OPENCLAW_AGENT=true`) bypasses `--confirm YES`.
 | `RISK_MAX_SLIPPAGE_BPS` | No | `30` | reserved |
 | `TRADER_FEE_BPS` | No | `5` | reserved |
 
-### 4.5 Resilience (Retry/Kill-Switch)
+### 4.5 Strategy (RSI)
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `STRATEGY_RSI_PERIOD` | No | `14` | RSI period |
+| `STRATEGY_RSI_INTERVAL` | No | `15m` | candle interval |
+| `STRATEGY_RSI_CANDLE_COUNT` | No | `100` | candle fetch count (min `period+1`) |
+| `STRATEGY_RSI_OVERSOLD` | No | `30` | BUY threshold |
+| `STRATEGY_RSI_OVERBOUGHT` | No | `70` | SELL threshold |
+| `STRATEGY_DEFAULT_ORDER_AMOUNT_KRW` | No | `5000` | fallback order amount when strategy budget is omitted |
+
+### 4.6 Resilience (Retry/Kill-Switch)
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `TRADER_AUTO_RETRY_ENABLED` | No | `true` | enable automatic handling for `code=5/7` |
@@ -164,7 +201,7 @@ OpenClaw mode (`OPENCLAW_AGENT=true`) bypasses `--confirm YES`.
 | `TRADER_AUTO_KILL_SWITCH_WINDOW_SEC` | No | `120` | failure aggregation window (sec) |
 | `TRADER_UNKNOWN_SUBMIT_MAX_AGE_SEC` | No | `180` | protection threshold for long `UNKNOWN_SUBMIT` |
 
-### 4.6 Example `.env`
+### 4.7 Example `.env`
 ```env
 BITHUMB_ACCESS_KEY=...
 BITHUMB_SECRET_KEY=...
@@ -186,12 +223,20 @@ RISK_MIN_ORDER_NOTIONAL_KRW=5000
 RISK_MIN_ORDER_NOTIONAL_BY_SYMBOL=USDT_KRW:1000,BTC_KRW:7000
 RISK_MAX_ORDER_NOTIONAL_KRW=300000
 RISK_DAILY_LOSS_LIMIT_KRW=500000
+TRADER_INITIAL_CAPITAL_KRW=
 RISK_AI_MAX_ORDER_NOTIONAL_KRW=100000
 RISK_AI_MAX_ORDERS_PER_WINDOW=3
 RISK_AI_ORDER_COUNT_WINDOW_SEC=60
 RISK_AI_MAX_TOTAL_EXPOSURE_KRW=500000
 RISK_MAX_SLIPPAGE_BPS=30
 TRADER_FEE_BPS=5
+
+STRATEGY_RSI_PERIOD=14
+STRATEGY_RSI_INTERVAL=15m
+STRATEGY_RSI_CANDLE_COUNT=100
+STRATEGY_RSI_OVERSOLD=30
+STRATEGY_RSI_OVERBOUGHT=70
+STRATEGY_DEFAULT_ORDER_AMOUNT_KRW=5000
 
 TRADER_AUTO_RETRY_ENABLED=true
 TRADER_AUTO_RETRY_ATTEMPTS=2
@@ -280,7 +325,26 @@ Response highlights:
 - `data.ranked`: scored ranking
 - `data.metrics`: evidence fields
 
-## 5.8 `order place`
+## 5.8 `strategy run`
+```bash
+# signal-only run (recommended first step)
+node src/cli/index.js strategy run --name rsi --symbol USDT_KRW --dry-run --json
+
+# execution run (paper/live follows current paper mode)
+node src/cli/index.js strategy run --name rsi --symbol USDT_KRW --budget 7000 --json
+```
+Notes:
+- currently implemented strategy name is `rsi`
+- `--budget` is optional; fallback uses `STRATEGY_DEFAULT_ORDER_AMOUNT_KRW`
+- BUY signal places market buy (amount-based KRW order)
+- HOLD/SELL signal does not place an order
+
+Response highlights:
+- `data.signal.signal`: `BUY|SELL|HOLD`
+- `data.rsi.value`: computed RSI
+- `data.order`: order payload when BUY is executed
+
+## 5.9 `order place`
 ```bash
 # explicit symbol
 node src/cli/index.js order place --symbol BTC_KRW --side buy --type limit --price 100000 --amount 5000 --client-order-key ord-001 --json
@@ -305,7 +369,7 @@ Live mode notes:
 - manual mode requires `--confirm YES`
 - OpenClaw mode bypasses confirm
 
-## 5.9 `order unknown` (UNKNOWN_SUBMIT cleanup)
+## 5.10 `order unknown` (UNKNOWN_SUBMIT cleanup)
 ```bash
 # single: force-close to CANCELED
 node src/cli/index.js order unknown --id <order_id> --action force-close --reason manual-cleanup --json
@@ -323,7 +387,7 @@ Notes:
 - this command resolves local state only.
 - always verify actual exchange status with `reconcile` and account/fill checks.
 
-## 5.10 `order chance/list/get/cancel`
+## 5.11 `order chance/list/get/cancel`
 ```bash
 node src/cli/index.js order chance --symbol USDT_KRW --json
 node src/cli/index.js order list --symbol USDT_KRW --state wait --page 1 --limit 100 --order-by desc --json
@@ -346,19 +410,19 @@ Highlights:
   - when local `exchangeOrderId` is missing, cancel path tries a `clientOrderKey` lookup before cancel
   - if local order does not exist, `--id` can still be used as exchange UUID for direct cancel
 
-## 5.11 `account list`
+## 5.12 `account list`
 ```bash
 node src/cli/index.js account list --json
 ```
 Use it to fetch account balances/locked amounts and persist a `balancesSnapshot`.
 
-## 5.12 `kill-switch`
+## 5.13 `kill-switch`
 ```bash
 node src/cli/index.js kill-switch on --reason emergency --json
 node src/cli/index.js kill-switch off --reason resume --json
 ```
 
-## 5.13 `reconcile` and `logs`
+## 5.14 `reconcile` and `logs`
 ```bash
 node src/cli/index.js reconcile run --json
 node src/cli/index.js logs tail --json
@@ -464,6 +528,7 @@ Rules:
 - [ ] paper order/cancel/get flow validated
 - [ ] error-code handling implemented in agent
 - [ ] kill-switch tested
+- [ ] set `TRADER_INITIAL_CAPITAL_KRW` if deterministic daily loss-limit baseline is required
 
 ## 8.3 During live trading
 - [ ] every order uses `--client-order-key`
@@ -531,6 +596,33 @@ Action:
 1. validate ID from `order list`
 2. run `reconcile run`
 
+## 9.7 Daily loss cap seems ignored
+Cause:
+- baseline capital was not explicitly defined, or account snapshot context is missing
+
+Action:
+1. set `TRADER_INITIAL_CAPITAL_KRW` in `.env`
+2. run `account list --json` to refresh `balancesSnapshot`
+3. retry and inspect risk response details
+
+## 9.8 `STRATEGY_RSI_DATA_INSUFFICIENT`
+Cause:
+- valid candle count is lower than required (`period + 1`)
+
+Action:
+1. increase `STRATEGY_RSI_CANDLE_COUNT`
+2. validate symbol/interval with `candles --json`
+3. run `strategy run --name rsi --dry-run --json` and inspect RSI payload
+
+## 9.9 RSI strategy does not place BUY orders
+Cause:
+- current RSI does not satisfy BUY threshold (`RSI <= STRATEGY_RSI_OVERSOLD`)
+
+Action:
+1. inspect `data.rsi.value` from dry-run
+2. tune `STRATEGY_RSI_OVERSOLD` carefully
+3. confirm current paper/live mode before execution run
+
 ## 10. Security Practices
 - never commit `.env`
 - rotate keys regularly
@@ -539,7 +631,8 @@ Action:
 
 ## 11. Current Limitations
 - limited websocket-based real-time synchronization
-- minimal PnL/position layer
+- daily PnL guardrail uses equity snapshot estimation (not full ledger accounting)
+- built-in strategy set is currently limited (RSI path implemented)
 - no built-in long-horizon analytics dashboard (CLI/JSON-first output only)
 
 ## 12. Recommended Next Steps

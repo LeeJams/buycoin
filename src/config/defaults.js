@@ -26,6 +26,17 @@ function toPositiveInt(value, fallback) {
   return Math.max(1, Math.floor(parsed));
 }
 
+function toNullablePositiveNumber(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
 function toList(value, fallback = []) {
   if (value === undefined || value === null || value === "") {
     return [...fallback];
@@ -127,8 +138,17 @@ export function loadConfig(env = process.env) {
       aiMaxOrdersPerWindow: toPositiveInt(env.RISK_AI_MAX_ORDERS_PER_WINDOW, 3),
       aiOrderCountWindowSec: toPositiveInt(env.RISK_AI_ORDER_COUNT_WINDOW_SEC, 60),
       aiMaxTotalExposureKrw: toNumber(env.RISK_AI_MAX_TOTAL_EXPOSURE_KRW, 500_000),
+      initialCapitalKrw: toNullablePositiveNumber(env.TRADER_INITIAL_CAPITAL_KRW),
       maxSlippageBps: toNumber(env.RISK_MAX_SLIPPAGE_BPS, 30),
       feeBps: toNumber(env.TRADER_FEE_BPS, 5),
+    },
+    strategy: {
+      rsiPeriod: toPositiveInt(env.STRATEGY_RSI_PERIOD, 14),
+      rsiInterval: String(env.STRATEGY_RSI_INTERVAL || "15m").toLowerCase(),
+      rsiCandleCount: toPositiveInt(env.STRATEGY_RSI_CANDLE_COUNT, 100),
+      rsiOversold: toNumber(env.STRATEGY_RSI_OVERSOLD, 30),
+      rsiOverbought: toNumber(env.STRATEGY_RSI_OVERBOUGHT, 70),
+      defaultOrderAmountKrw: toNumber(env.STRATEGY_DEFAULT_ORDER_AMOUNT_KRW, 5_000),
     },
     logging: {
       level: env.LOG_LEVEL || "info",

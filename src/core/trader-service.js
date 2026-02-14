@@ -13,6 +13,7 @@ import { SymbolSelector } from "./symbol-selector.js";
 import { StateSync } from "./state-sync.js";
 import { StateStore } from "./store.js";
 import { BithumbClient } from "../exchange/bithumb-client.js";
+import { calculateRsi, evaluateRsiSignal } from "../strategy/rsi.js";
 
 function normalizeSide(side) {
   const s = String(side || "").toLowerCase();
@@ -72,6 +73,11 @@ function parseAmount(value, label) {
   return num;
 }
 
+function asNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function asPositiveNumber(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -102,6 +108,15 @@ function extractChanceMinTotalKrw(payload, side) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function dateByTimezone(timezone = "Asia/Seoul") {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
 
 function latestIso(items = [], key = "eventTs") {
@@ -688,22 +703,7 @@ export class TraderService {
     try {
       const payload = await this.exchangeClient.getAccounts();
       const accounts = normalizeAccounts(payload);
-      const capturedAt = nowIso();
-
-      await this.store.update((state) => {
-        state.balancesSnapshot.push({
-          id: uuid(),
-          capturedAt,
-          source: "account-list",
-          items: accounts,
-        });
-
-        if (state.balancesSnapshot.length > 200) {
-          state.balancesSnapshot = state.balancesSnapshot.slice(-200);
-        }
-
-        return state;
-      });
+      const capturedAt = await this.captureBalancesSnapshot("account-list", accounts);
 
       return {
         ok: true,
@@ -725,6 +725,129 @@ export class TraderService {
         },
       };
     }
+  }
+
+  async captureBalancesSnapshot(source, accounts = []) {
+    const capturedAt = nowIso();
+    await this.store.update((state) => {
+      state.balancesSnapshot.push({
+        id: uuid(),
+        capturedAt,
+        source,
+        items: accounts,
+      });
+
+      if (state.balancesSnapshot.length > 200) {
+        state.balancesSnapshot = state.balancesSnapshot.slice(-200);
+      }
+
+      return state;
+    });
+    return capturedAt;
+  }
+
+  estimateAccountsEquityKrw(accounts = []) {
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+      return null;
+    }
+
+    let total = 0;
+    for (const account of accounts) {
+      const currency = String(account?.currency || "").toUpperCase();
+      const unitCurrency = String(account?.unitCurrency || "KRW").toUpperCase();
+      const balance = Math.max(asNumber(account?.balance, 0), 0);
+      const locked = Math.max(asNumber(account?.locked, 0), 0);
+      const quantity = balance + locked;
+      if (quantity <= 0) {
+        continue;
+      }
+
+      if (currency === "KRW") {
+        total += quantity;
+        continue;
+      }
+
+      if (unitCurrency === "KRW") {
+        const avgBuyPrice = asNumber(account?.avgBuyPrice, NaN);
+        if (Number.isFinite(avgBuyPrice) && avgBuyPrice > 0) {
+          total += quantity * avgBuyPrice;
+        }
+      }
+    }
+
+    return Number.isFinite(total) ? total : null;
+  }
+
+  async resolveDailyPnlContext(baseContext = {}) {
+    if (Number.isFinite(asNumber(baseContext.dailyRealizedPnlKrw, NaN))) {
+      return baseContext;
+    }
+
+    if (this.paperMode()) {
+      return baseContext;
+    }
+
+    let equityKrw = null;
+    try {
+      const payload = await this.exchangeClient.getAccounts();
+      const accounts = normalizeAccounts(payload);
+      await this.captureBalancesSnapshot("risk-context", accounts);
+      equityKrw = this.estimateAccountsEquityKrw(accounts);
+    } catch {
+      const latestSnapshot = this.store.snapshot().balancesSnapshot.at(-1);
+      if (latestSnapshot && Array.isArray(latestSnapshot.items)) {
+        equityKrw = this.estimateAccountsEquityKrw(latestSnapshot.items);
+      }
+    }
+
+    if (!Number.isFinite(equityKrw)) {
+      return baseContext;
+    }
+
+    const tradeDate = dateByTimezone(this.config.runtime.timezone);
+    const configuredCapital = asNumber(this.config.trading.initialCapitalKrw, NaN);
+    let baseline = null;
+    await this.store.update((state) => {
+      const saved = state.settings.dailyPnlBaseline;
+      const hasValidSaved =
+        saved &&
+        saved.date === tradeDate &&
+        Number.isFinite(asNumber(saved.equityKrw, NaN));
+
+      if (hasValidSaved) {
+        baseline = Number(saved.equityKrw);
+        return state;
+      }
+
+      const nextBaseline = Number.isFinite(configuredCapital) && configuredCapital > 0
+        ? configuredCapital
+        : equityKrw;
+
+      state.settings.dailyPnlBaseline = {
+        date: tradeDate,
+        equityKrw: nextBaseline,
+        source: Number.isFinite(configuredCapital) && configuredCapital > 0
+          ? "initial_capital"
+          : "equity_snapshot",
+        updatedAt: nowIso(),
+      };
+      baseline = nextBaseline;
+      return state;
+    });
+
+    if (!Number.isFinite(baseline)) {
+      return baseContext;
+    }
+
+    return {
+      ...baseContext,
+      dailyRealizedPnlKrw: equityKrw - baseline,
+      dailyPnlMeta: {
+        tradeDate,
+        baselineEquityKrw: baseline,
+        currentEquityKrw: equityKrw,
+      },
+    };
   }
 
   buildOrderInput(options = {}) {
@@ -977,8 +1100,9 @@ export class TraderService {
       }
     }
 
+    const riskContext = await this.resolveDailyPnlContext(options.context || {});
     const risk = this.riskEngine.evaluateOrder(order, {
-      ...(options.context || {}),
+      ...riskContext,
       aiSelected: Boolean(options.autoSymbol),
       minOrderNotionalKrwOverride: dynamicMinOrderNotional,
     });
@@ -1380,6 +1504,178 @@ export class TraderService {
     }
   }
 
+  buildRsiRuntimeConfig() {
+    const config = this.config.strategy || {};
+    const period = Math.max(2, Number.isFinite(asNumber(config.rsiPeriod, NaN)) ? Math.floor(config.rsiPeriod) : 14);
+    const interval = String(config.rsiInterval || "15m").toLowerCase();
+    const candleCountRaw = Number.isFinite(asNumber(config.rsiCandleCount, NaN))
+      ? Math.floor(config.rsiCandleCount)
+      : 100;
+    const candleCount = Math.max(period + 1, candleCountRaw);
+    const oversold = Number.isFinite(asNumber(config.rsiOversold, NaN)) ? Number(config.rsiOversold) : 30;
+    const overbought = Number.isFinite(asNumber(config.rsiOverbought, NaN)) ? Number(config.rsiOverbought) : 70;
+    const defaultOrderAmountKrw = Number.isFinite(asNumber(config.defaultOrderAmountKrw, NaN))
+      ? Number(config.defaultOrderAmountKrw)
+      : 5000;
+    return {
+      period,
+      interval,
+      candleCount,
+      oversold,
+      overbought,
+      defaultOrderAmountKrw,
+    };
+  }
+
+  async finalizeStrategyRun(runId, status, patch = {}) {
+    await this.store.update((state) => {
+      const target = state.strategyRuns.find((item) => item.id === runId);
+      if (!target) {
+        return state;
+      }
+      target.status = status;
+      target.endedAt = nowIso();
+      Object.assign(target, patch);
+      return state;
+    });
+  }
+
+  async executeRsiStrategy(run) {
+    const runtime = this.buildRsiRuntimeConfig();
+    try {
+      const market = await this.fetchCandles({
+        symbol: run.symbol,
+        interval: runtime.interval,
+        count: runtime.candleCount,
+        to: null,
+      });
+      if (!market.ok) {
+        await this.finalizeStrategyRun(run.id, "FAILED", {
+          error: market.error || null,
+        });
+        return market;
+      }
+
+      const closes = market.data.candles
+        .map((row) => asNumber(row.close, NaN))
+        .filter((value) => Number.isFinite(value));
+      const latestClose = closes.at(-1) || null;
+      const rsiValue = calculateRsi(closes, runtime.period);
+      if (!Number.isFinite(rsiValue)) {
+        const error = {
+          message: `Insufficient candle data for RSI(period=${runtime.period})`,
+          type: "STRATEGY_RSI_DATA_INSUFFICIENT",
+          retryable: true,
+          details: {
+            symbol: run.symbol,
+            interval: runtime.interval,
+            candleCountRequested: runtime.candleCount,
+            candleCountReceived: closes.length,
+            requiredCandles: runtime.period + 1,
+          },
+        };
+        await this.finalizeStrategyRun(run.id, "FAILED", { error });
+        return {
+          ok: false,
+          code: EXIT_CODES.EXCHANGE_RETRYABLE,
+          error,
+        };
+      }
+
+      const signal = evaluateRsiSignal({
+        rsi: rsiValue,
+        oversold: runtime.oversold,
+        overbought: runtime.overbought,
+      });
+
+      const strategyPayload = {
+        runId: run.id,
+        name: run.name,
+        symbol: run.symbol,
+        mode: run.mode,
+        dryRun: run.dryRun,
+        signal,
+        rsi: {
+          value: rsiValue,
+          period: runtime.period,
+          interval: runtime.interval,
+          candleCount: closes.length,
+          latestClose,
+          oversold: runtime.oversold,
+          overbought: runtime.overbought,
+        },
+      };
+
+      if (run.dryRun || signal.signal !== "BUY") {
+        await this.finalizeStrategyRun(run.id, "COMPLETED", {
+          result: strategyPayload,
+        });
+        return {
+          ok: true,
+          code: EXIT_CODES.OK,
+          data: {
+            ...strategyPayload,
+            order: null,
+          },
+        };
+      }
+
+      const amount = Number.isFinite(asNumber(run.budget, NaN)) && run.budget > 0
+        ? run.budget
+        : runtime.defaultOrderAmountKrw;
+      const order = await this.placeOrderDirect({
+        symbol: run.symbol,
+        side: "buy",
+        type: "market",
+        amount,
+        strategy: "rsi",
+        strategyRunId: run.id,
+        reason: `rsi_signal:${signal.reason}`,
+      });
+
+      if (!order.ok) {
+        await this.finalizeStrategyRun(run.id, "FAILED", {
+          result: strategyPayload,
+          error: order.error || null,
+        });
+        return {
+          ...order,
+          error: {
+            ...(order.error || {}),
+            strategy: strategyPayload,
+          },
+        };
+      }
+
+      await this.finalizeStrategyRun(run.id, "COMPLETED", {
+        result: strategyPayload,
+      });
+      return {
+        ok: true,
+        code: EXIT_CODES.OK,
+        data: {
+          ...strategyPayload,
+          order: order.data,
+        },
+      };
+    } catch (error) {
+      await this.finalizeStrategyRun(run.id, "FAILED", {
+        error: {
+          message: error.message,
+        },
+      });
+      return {
+        ok: false,
+        code: EXIT_CODES.EXCHANGE_RETRYABLE,
+        error: {
+          message: error.message,
+          type: "STRATEGY_RUNTIME_FAILED",
+          retryable: true,
+        },
+      };
+    }
+  }
+
   async runStrategy({ name = "grid", symbol, dryRun = false, budget = null }) {
     const run = {
       id: uuid(),
@@ -1399,6 +1695,10 @@ export class TraderService {
       state.strategyRuns.push(run);
       return state;
     });
+
+    if (String(name || "").trim().toLowerCase() === "rsi") {
+      return this.executeRsiStrategy(run);
+    }
 
     return {
       ok: true,

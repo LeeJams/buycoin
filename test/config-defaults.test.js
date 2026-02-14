@@ -45,3 +45,14 @@ test("ai hard cap defaults are configured", () => {
   assert.equal(config.trading.aiOrderCountWindowSec, 60);
   assert.equal(config.trading.aiMaxTotalExposureKrw, 500000);
 });
+
+test("strategy and capital defaults are configured", () => {
+  const config = loadConfig({});
+  assert.equal(config.trading.initialCapitalKrw, null);
+  assert.equal(config.strategy.rsiPeriod, 14);
+  assert.equal(config.strategy.rsiInterval, "15m");
+  assert.equal(config.strategy.rsiCandleCount, 100);
+  assert.equal(config.strategy.rsiOversold, 30);
+  assert.equal(config.strategy.rsiOverbought, 70);
+  assert.equal(config.strategy.defaultOrderAmountKrw, 5000);
+});

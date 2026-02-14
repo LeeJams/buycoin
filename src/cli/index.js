@@ -58,7 +58,7 @@ Usage:
   trader markets --symbol BTC_KRW [--json]
   trader candles --symbol BTC_KRW [--interval 1m|3m|5m|10m|15m|30m|60m|240m|day|week|month] [--count 200] [--to 2026-02-13T15:00:00+09:00] [--json]
   trader paper on|off [--reason TEXT] [--json]
-  trader strategy run --name grid [--symbol BTC_KRW] [--dry-run] [--budget 100000] [--json]
+  trader strategy run --name grid|rsi [--symbol BTC_KRW] [--dry-run] [--budget 100000] [--json]
   trader strategy stop [--name grid] [--json]
   trader order pick [--side buy] [--select-mode momentum|volume] [--candidates BTC_KRW,ETH_KRW] [--json]
   trader order chance [--symbol BTC_KRW] [--json]

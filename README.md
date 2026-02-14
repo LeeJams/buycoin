@@ -20,6 +20,7 @@ Detailed guides:
 | Order execution | Places amount-based orders (`amount` in KRW, quantity derived internally) | `order place` |
 | Order tracking | Lists and fetches order details, supports cancel | `order list`, `order get`, `order cancel` |
 | AI symbol selection | Picks symbols from candidate universe by ranking | `order pick`, `order place --auto-symbol` |
+| Strategy execution | Runs strategy logic and can place real/paper orders | `strategy run --name rsi` |
 | Risk enforcement | Blocks unsafe orders via hard risk rules | built into `order place` |
 | Recovery | Reconciles `UNKNOWN_SUBMIT`, missing exchange UUIDs, and stale local state | `reconcile run`, `order unknown` |
 | Agent audit | Records agent-executed CLI actions in local state | `agentAudit` |
@@ -40,11 +41,69 @@ Detailed guides:
 | Max order notional | Upper bound per order | `300000` | `RISK_MAX_ORDER_NOTIONAL_KRW` |
 | Max concurrent open orders | Limits simultaneously open orders | `5` | `RISK_MAX_CONCURRENT_ORDERS` |
 | Daily loss limit | Stops new risk if daily realized loss threshold is exceeded | `500000` | `RISK_DAILY_LOSS_LIMIT_KRW` |
+| Initial capital baseline | Optional baseline for daily PnL calculation in live mode | empty | `TRADER_INITIAL_CAPITAL_KRW` |
 | AI max order notional | Applies only to `--auto-symbol` orders | `100000` | `RISK_AI_MAX_ORDER_NOTIONAL_KRW` |
 | AI max orders per window | Order count cap for auto-symbol mode | `3` | `RISK_AI_MAX_ORDERS_PER_WINDOW` |
 | AI order-count window | Counting window in seconds | `60` | `RISK_AI_ORDER_COUNT_WINDOW_SEC` |
 | AI max total exposure | Exposure cap for AI buy orders | `500000` | `RISK_AI_MAX_TOTAL_EXPOSURE_KRW` |
 | Kill switch | Blocks new orders and attempts open-order cleanup | off | `kill-switch on/off` |
+
+## Daily PnL Baseline (Live Orders)
+This is the key fix for the "daily loss limit not applied" issue.
+
+Behavior:
+1. Before each live order, the system builds risk context from private account data.
+2. It estimates current KRW equity from:
+   - KRW balance (`balance + locked`)
+   - non-KRW holdings valued by `avgBuyPrice` when `unitCurrency=KRW`
+3. It decides baseline by trade date (`TZ`, default `Asia/Seoul`):
+   - if `TRADER_INITIAL_CAPITAL_KRW` is set and valid, baseline = this value
+   - otherwise baseline = first observed equity of the day
+4. It computes:
+   - `dailyRealizedPnlKrw = currentEquityKrw - baselineEquityKrw`
+5. If account fetch fails, it falls back to latest stored balance snapshot.
+6. Risk rule `RISK_DAILY_LOSS_LIMIT_KRW` is then applied with this computed PnL.
+
+Where it is stored:
+- `state.settings.dailyPnlBaseline`
+- `state.balancesSnapshot[]` (recent snapshots, capped)
+
+Important notes:
+- Paper mode does not use exchange equity for this context.
+- If you want deterministic daily-loss behavior from startup, set `TRADER_INITIAL_CAPITAL_KRW`.
+
+## RSI Strategy (Implemented)
+`rsi` strategy is fully wired into `strategy run`.
+
+Command:
+```bash
+npm start -- strategy run --name rsi --symbol USDT_KRW --dry-run --json
+```
+
+Execution rules:
+1. Fetch candles with configured interval/count.
+2. Compute RSI (Wilder smoothing).
+3. Evaluate signal using oversold/overbought thresholds.
+4. If `--dry-run`, return signal only.
+5. If live/paper execution and signal is `BUY`, submit market buy with KRW amount.
+6. If signal is `HOLD` or `SELL`, no order is submitted.
+
+RSI strategy config:
+| Variable | Default | Description |
+|---|---|---|
+| `STRATEGY_RSI_PERIOD` | `14` | RSI period |
+| `STRATEGY_RSI_INTERVAL` | `15m` | Candle interval (`1m...240m`, `day`, `week`, `month`) |
+| `STRATEGY_RSI_CANDLE_COUNT` | `100` | Requested candle count (auto-adjusted to at least `period+1`) |
+| `STRATEGY_RSI_OVERSOLD` | `30` | BUY threshold (RSI <= oversold) |
+| `STRATEGY_RSI_OVERBOUGHT` | `70` | SELL threshold (RSI >= overbought) |
+| `STRATEGY_DEFAULT_ORDER_AMOUNT_KRW` | `5000` | Fallback order amount when budget is omitted |
+
+## Troubleshooting for Recent Issues
+| Symptom | Meaning | Action |
+|---|---|---|
+| Daily loss cap seems ignored | No deterministic baseline was available | Set `TRADER_INITIAL_CAPITAL_KRW` and verify `status --json` + live `order place --json` responses |
+| `STRATEGY_RSI_DATA_INSUFFICIENT` | Not enough valid candles for configured period | Increase `STRATEGY_RSI_CANDLE_COUNT`, check symbol/interval availability |
+| RSI strategy never buys | Signal is not `BUY` under thresholds | Use `--dry-run --json` first and inspect `data.rsi.value` with thresholds |
 
 ## OpenClaw Mode
 Enable:
@@ -85,6 +144,17 @@ OPENCLAW_AGENT=true
 # AI symbol universe
 TRADER_AUTO_SELECT_MODE=momentum
 TRADER_AUTO_SELECT_CANDIDATES=BTC_KRW,ETH_KRW,XRP_KRW,SOL_KRW,DOGE_KRW
+
+# Optional daily-loss baseline
+TRADER_INITIAL_CAPITAL_KRW=
+
+# RSI strategy
+STRATEGY_RSI_PERIOD=14
+STRATEGY_RSI_INTERVAL=15m
+STRATEGY_RSI_CANDLE_COUNT=100
+STRATEGY_RSI_OVERSOLD=30
+STRATEGY_RSI_OVERBOUGHT=70
+STRATEGY_DEFAULT_ORDER_AMOUNT_KRW=5000
 ```
 
 ## Quick Start
@@ -93,6 +163,7 @@ npm start -- status --json
 npm start -- health --check-exchange --json
 npm start -- order chance --symbol USDT_KRW --json
 npm start -- order pick --side buy --select-mode momentum --json
+npm start -- strategy run --name rsi --symbol USDT_KRW --dry-run --json
 npm start -- order place --auto-symbol --side buy --type limit --price 100000 --amount 5000 --client-order-key ai-001 --json
 ```
 
@@ -109,6 +180,7 @@ npm start -- order place --symbol USDT_KRW --side buy --type limit --price 1467 
 | `trader markets --symbol BTC_KRW --json` | Single-symbol ticker | ticker payload |
 | `trader candles --symbol USDT_KRW --interval 1m --count 30 --json` | Historical candles | candle array |
 | `trader order chance --symbol USDT_KRW --json` | Exchange orderability/minimum check | `market.bid.min_total`, `market.ask.min_total` |
+| `trader strategy run --name rsi --symbol USDT_KRW --dry-run --json` | Run RSI strategy and return signal | `data.signal`, `data.rsi`, `data.order` |
 | `trader order pick --side buy --json` | AI symbol ranking and selection | `data.symbol`, `data.ranked` |
 | `trader order place ... --amount ... --json` | Place order | order state or risk rejection reasons |
 | `trader order list --symbol USDT_KRW --json` | List orders | order list |
@@ -133,6 +205,11 @@ npm start -- order place --symbol USDT_KRW --side buy --type limit --price 1467 
 ## State and Persistence
 - Runtime state file: `.trader/state.json`
 - Includes orders, order events, fills, account snapshots, risk events, agent audit, and health history.
+- Stores daily PnL baseline at `settings.dailyPnlBaseline`.
+- Stores account snapshots from:
+  - `account list` command
+  - live-order risk context build
+- Keeps recent balance snapshots (rolling cap) to support fallback when private account fetch fails.
 - Reconcile can backfill missing exchange UUIDs and resolve uncertain submission states.
 
 ## Testing
