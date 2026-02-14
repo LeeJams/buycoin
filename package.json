@@ -1,0 +1,29 @@
+{
+  "name": "buycoin-trader",
+  "version": "0.1.0",
+  "description": "CLI-first crypto trading system for Bithumb with OpenClaw-safe controls",
+  "type": "module",
+  "bin": {
+    "trader": "./src/cli/index.js"
+  },
+  "scripts": {
+    "start": "node ./src/cli/index.js",
+    "test": "node --test",
+    "lint": "eslint src test scripts test-utils"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "trading",
+    "cli",
+    "bithumb",
+    "openclaw"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.0",
+    "globals": "^17.3.0"
+  }
+}
