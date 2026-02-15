@@ -360,10 +360,11 @@ export class TradingSystem {
         this.config.runtime.paperInitialCashKrw,
       );
 
-      if (state.settings.paperModeInitialized !== true) {
-        state.settings.paperMode = this.config.runtime.paperMode;
-        state.settings.paperModeInitialized = true;
-      }
+      // Always align persisted runtime mode with current config at startup.
+      // This prevents stale state.json from silently forcing paper mode in live runs.
+      state.settings.paperMode = Boolean(this.config.runtime.paperMode);
+      state.settings.paperModeInitialized = true;
+      state.settings.paperReason = "runtime_config";
       if (typeof state.settings.killSwitch !== "boolean") {
         state.settings.killSwitch = false;
       }
