@@ -1,13 +1,15 @@
 {
   "name": "buycoin-trader",
   "version": "0.1.0",
-  "description": "CLI-first crypto trading system for Bithumb with OpenClaw-safe controls",
+  "description": "Execution-first orthodox crypto trading system for Bithumb (rule-based realtime engine, AI overlay cache)",
   "type": "module",
-  "bin": {
-    "trader": "./src/cli/index.js"
-  },
   "scripts": {
-    "start": "node ./src/cli/index.js",
+    "start": "node ./src/app/run.js",
+    "start:once": "EXECUTION_MAX_WINDOWS=1 node ./src/app/run.js",
+    "optimize": "node ./src/app/optimize.js",
+    "smoke": "node ./src/app/smoke.js",
+    "smoke:write": "SMOKE_ENABLE_WRITES=true SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND node ./src/app/smoke.js",
+    "audit:report": "node ./src/app/audit-report.js",
     "test": "node --test",
     "lint": "eslint src test scripts test-utils"
   },
@@ -16,11 +18,14 @@
   },
   "keywords": [
     "trading",
-    "cli",
+    "daemon",
     "bithumb",
-    "openclaw"
+    "execution"
   ],
   "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.0.0",

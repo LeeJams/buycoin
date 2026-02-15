@@ -1,225 +1,287 @@
-# buycoin-trader
+# buycoin-trader (Execution-First Orthodox Architecture)
 
-CLI-first trading system for the Bithumb API with OpenClaw orchestration.
+An execution-first Bithumb trading system rebuilt with orthodox architecture:
 
-- No web dashboard.
-- All operations are executed via CLI.
-- Human-readable and machine-readable output are both supported (`--json`).
+- Deterministic execution path (rule-based, low-latency)
+- AI/ML is **not** in execution timing path
+- AI is only an **overlay cache** for position sizing
 
-Detailed guides:
-- Korean (full): `./USAGE_KO.md`
-- Korean (beginner): `./GUIDE_KO_BEGINNER.md`
-- English (full): `./USAGE_EN.md`
+## Core Principle
 
-## What This System Does
-| Area | What it does | Main commands |
-|---|---|---|
-| Runtime status | Shows current mode, kill-switch state, open order count, recent events | `status`, `health` |
-| Market data | Fetches ticker and candles (minute/day/week/month) | `markets`, `candles` |
-| Orderability check | Checks exchange constraints including `min_total` before live orders | `order chance` |
-| Order execution | Places amount-based orders (`amount` in KRW, quantity derived internally) | `order place` |
-| Order tracking | Lists and fetches order details, supports cancel | `order list`, `order get`, `order cancel` |
-| AI symbol selection | Picks symbols from candidate universe by ranking | `order pick`, `order place --auto-symbol` |
-| Strategy execution | Runs strategy logic and can place real/paper orders | `strategy run --name rsi` |
-| Risk enforcement | Blocks unsafe orders via hard risk rules | built into `order place` |
-| Recovery | Reconciles `UNKNOWN_SUBMIT`, missing exchange UUIDs, and stale local state | `reconcile run`, `order unknown` |
-| Agent audit | Records agent-executed CLI actions in local state | `agentAudit` |
+Execution is strictly:
 
-## Order Flow (Live)
-1. Build order input from CLI options.
-2. Call `order chance` to fetch exchange-side minimum notional.
-3. Run risk evaluation.
-4. Submit order to exchange.
-5. Save order as `ACCEPTED` or `UNKNOWN_SUBMIT` on uncertain failure.
-6. Recover with `reconcile run` if needed.
+`MarketData -> SignalEngine -> RiskEngine -> ExecutionEngine`
 
-## Risk and Safety Controls
-| Control | Description | Default | Environment variable |
-|---|---|---|---|
-| Min order notional | Lower bound for order notional | `5000` | `RISK_MIN_ORDER_NOTIONAL_KRW` |
-| Symbol min override | Per-symbol minimum notional override | empty | `RISK_MIN_ORDER_NOTIONAL_BY_SYMBOL` |
-| Max order notional | Upper bound per order | `300000` | `RISK_MAX_ORDER_NOTIONAL_KRW` |
-| Max concurrent open orders | Limits simultaneously open orders | `5` | `RISK_MAX_CONCURRENT_ORDERS` |
-| Daily loss limit | Stops new risk if daily realized loss threshold is exceeded | `500000` | `RISK_DAILY_LOSS_LIMIT_KRW` |
-| Initial capital baseline | Optional baseline for daily PnL calculation in live mode | empty | `TRADER_INITIAL_CAPITAL_KRW` |
-| AI max order notional | Applies only to `--auto-symbol` orders | `100000` | `RISK_AI_MAX_ORDER_NOTIONAL_KRW` |
-| AI max orders per window | Order count cap for auto-symbol mode | `3` | `RISK_AI_MAX_ORDERS_PER_WINDOW` |
-| AI order-count window | Counting window in seconds | `60` | `RISK_AI_ORDER_COUNT_WINDOW_SEC` |
-| AI max total exposure | Exposure cap for AI buy orders | `500000` | `RISK_AI_MAX_TOTAL_EXPOSURE_KRW` |
-| Kill switch | Blocks new orders and attempts open-order cleanup | off | `kill-switch on/off` |
+AI/ML role:
 
-## Daily PnL Baseline (Live Orders)
-This is the key fix for the "daily loss limit not applied" issue.
+- allowed: regime score, risk-on/off score, position multiplier cache
+- not allowed: real-time order trigger / order timing decision
 
-Behavior:
-1. Before each live order, the system builds risk context from private account data.
-2. It estimates current KRW equity from:
-   - KRW balance (`balance + locked`)
-   - non-KRW holdings valued by `avgBuyPrice` when `unitCurrency=KRW`
-3. It decides baseline by trade date (`TZ`, default `Asia/Seoul`):
-   - if `TRADER_INITIAL_CAPITAL_KRW` is set and valid, baseline = this value
-   - otherwise baseline = first observed equity of the day
-4. It computes:
-   - `dailyRealizedPnlKrw = currentEquityKrw - baselineEquityKrw`
-5. If account fetch fails, it falls back to latest stored balance snapshot.
-6. Risk rule `RISK_DAILY_LOSS_LIMIT_KRW` is then applied with this computed PnL.
+## What Changed
 
-Where it is stored:
-- `state.settings.dailyPnlBaseline`
-- `state.balancesSnapshot[]` (recent snapshots, capped)
-
-Important notes:
-- Paper mode does not use exchange equity for this context.
-- If you want deterministic daily-loss behavior from startup, set `TRADER_INITIAL_CAPITAL_KRW`.
-
-## RSI Strategy (Implemented)
-`rsi` strategy is fully wired into `strategy run`.
-
-Command:
-```bash
-npm start -- strategy run --name rsi --symbol USDT_KRW --dry-run --json
-```
-
-Execution rules:
-1. Fetch candles with configured interval/count.
-2. Compute RSI (Wilder smoothing).
-3. Evaluate signal using oversold/overbought thresholds.
-4. If `--dry-run`, return signal only.
-5. If live/paper execution and signal is `BUY`, submit market buy with KRW amount.
-6. If signal is `HOLD` or `SELL`, no order is submitted.
-
-RSI strategy config:
-| Variable | Default | Description |
-|---|---|---|
-| `STRATEGY_RSI_PERIOD` | `14` | RSI period |
-| `STRATEGY_RSI_INTERVAL` | `15m` | Candle interval (`1m...240m`, `day`, `week`, `month`) |
-| `STRATEGY_RSI_CANDLE_COUNT` | `100` | Requested candle count (auto-adjusted to at least `period+1`) |
-| `STRATEGY_RSI_OVERSOLD` | `30` | BUY threshold (RSI <= oversold) |
-| `STRATEGY_RSI_OVERBOUGHT` | `70` | SELL threshold (RSI >= overbought) |
-| `STRATEGY_DEFAULT_ORDER_AMOUNT_KRW` | `5000` | Fallback order amount when budget is omitted |
-
-## Troubleshooting for Recent Issues
-| Symptom | Meaning | Action |
-|---|---|---|
-| Daily loss cap seems ignored | No deterministic baseline was available | Set `TRADER_INITIAL_CAPITAL_KRW` and verify `status --json` + live `order place --json` responses |
-| `STRATEGY_RSI_DATA_INSUFFICIENT` | Not enough valid candles for configured period | Increase `STRATEGY_RSI_CANDLE_COUNT`, check symbol/interval availability |
-| RSI strategy never buys | Signal is not `BUY` under thresholds | Use `--dry-run --json` first and inspect `data.rsi.value` with thresholds |
-
-## OpenClaw Mode
-Enable:
-```bash
-OPENCLAW_AGENT=true
-```
-
-Behavior:
-- OpenClaw can execute CLI commands directly.
-- Commands are logged to `agentAudit`.
-- Manual confirmation (`--confirm YES`) is bypassed in agent mode.
+- Removed AI decisioning from order trigger path
+- Added timeout-guarded overlay cache (`OVERLAY_TIMEOUT_MS`)
+- Strategy run is immediate and rule-based
+- Added real-time WebSocket ticker mode (`socket.md` spec)
+- Primary runtime is daemon execution (`npm start`)
 
 ## Requirements
-- Node.js 20+
 
-## Installation
+- Node.js 20+
+- Bithumb API key/secret for live mode
+
+## Install
+
 ```bash
+cd ./buycoin
 npm install
 ```
 
-## Required `.env`
-```env
-BITHUMB_ACCESS_KEY=...
-BITHUMB_SECRET_KEY=...
-```
+## Environment
 
-## Common Runtime Configuration
-```env
-# Exchange request caps
-BITHUMB_PUBLIC_MAX_PER_SEC=150
-BITHUMB_PRIVATE_MAX_PER_SEC=140
+Copy from `.env.example` and fill keys.
 
-# Runtime mode
-TRADER_PAPER_MODE=true
-TRADER_DEFAULT_SYMBOL=BTC_KRW
-OPENCLAW_AGENT=true
+Key groups:
 
-# AI symbol universe
-TRADER_AUTO_SELECT_MODE=momentum
-TRADER_AUTO_SELECT_CANDIDATES=BTC_KRW,ETH_KRW,XRP_KRW,SOL_KRW,DOGE_KRW
-
-# Optional daily-loss baseline
-TRADER_INITIAL_CAPITAL_KRW=
-
-# RSI strategy
-STRATEGY_RSI_PERIOD=14
-STRATEGY_RSI_INTERVAL=15m
-STRATEGY_RSI_CANDLE_COUNT=100
-STRATEGY_RSI_OVERSOLD=30
-STRATEGY_RSI_OVERBOUGHT=70
-STRATEGY_DEFAULT_ORDER_AMOUNT_KRW=5000
-```
+- Exchange: `BITHUMB_*`
+- Runtime: `TRADER_*`, `TZ`
+- Strategy: `STRATEGY_*` (default: risk-managed momentum)
+- Risk: `RISK_*`, `TRADER_INITIAL_CAPITAL_KRW`
+- AI bridge: `AI_SETTINGS_*` (AI writes runtime settings file)
+- Overlay: `OVERLAY_*` (AI/ML cache settings)
 
 ## Quick Start
+
+### 0) Find and apply safest top-return setup (recommended first)
+
 ```bash
-npm start -- status --json
-npm start -- health --check-exchange --json
-npm start -- order chance --symbol USDT_KRW --json
-npm start -- order pick --side buy --select-mode momentum --json
-npm start -- strategy run --name rsi --symbol USDT_KRW --dry-run --json
-npm start -- order place --auto-symbol --side buy --type limit --price 100000 --amount 5000 --client-order-key ai-001 --json
+npm run optimize
 ```
 
-Manual live order (non-agent mode):
+This command:
+
+- fetches recent candles for `OPTIMIZER_SYMBOLS`
+- runs grid-search on momentum parameters
+- keeps only candidates that pass safety constraints
+  - max drawdown
+  - min trade count
+  - min win rate
+  - min profit factor
+  - min return
+- writes report to `OPTIMIZER_REPORT_FILE`
+- applies best candidate to `AI_SETTINGS_FILE` (`execution.symbol` + `strategy.*`)
+
+Hourly re-optimization (daemon runtime):
+
+- `OPTIMIZER_REOPT_ENABLED=true`
+- `OPTIMIZER_REOPT_INTERVAL_SEC=3600`
+
+### 1) Run as execution service (daemon)
+
 ```bash
-npm start -- order place --symbol USDT_KRW --side buy --type limit --price 1467 --amount 5000 --client-order-key live-001 --confirm YES --json
+npm start
 ```
 
-## Command Guide
-| Command | Purpose | Key output fields |
-|---|---|---|
-| `trader status --json` | Runtime snapshot | `settings`, `openOrders` |
-| `trader health --check-exchange --json` | Runtime + exchange readiness checks | `summary`, `checks[]` |
-| `trader markets --symbol BTC_KRW --json` | Single-symbol ticker | ticker payload |
-| `trader candles --symbol USDT_KRW --interval 1m --count 30 --json` | Historical candles | candle array |
-| `trader order chance --symbol USDT_KRW --json` | Exchange orderability/minimum check | `market.bid.min_total`, `market.ask.min_total` |
-| `trader strategy run --name rsi --symbol USDT_KRW --dry-run --json` | Run RSI strategy and return signal | `data.signal`, `data.rsi`, `data.order` |
-| `trader order pick --side buy --json` | AI symbol ranking and selection | `data.symbol`, `data.ranked` |
-| `trader order place ... --amount ... --json` | Place order | order state or risk rejection reasons |
-| `trader order list --symbol USDT_KRW --json` | List orders | order list |
-| `trader order get --id ... --json` | Fetch one order | local/exchange order detail |
-| `trader order cancel --id ... --json` | Cancel order | cancellation result |
-| `trader reconcile run --json` | Recover state mismatches | reconcile summary |
-| `trader order unknown ... --json` | Resolve stale `UNKNOWN_SUBMIT` locally | cleanup summary |
-| `trader account list --json` | Fetch balances and snapshot state | normalized account list |
-| `trader kill-switch on --reason ... --json` | Emergency stop | switch state |
+The service uses `EXECUTION_*` values from `.env` and runs realtime windows continuously.
+When enabled, it also reads AI runtime settings from `.trader/ai-settings.json` every window.
 
-## Exit Codes
-- `0`: success
-- `2`: invalid args
-- `3`: risk rejected
-- `5`: exchange retryable
-- `6`: exchange fatal
-- `7`: rate-limited
-- `8`: reconcile mismatch
-- `9`: kill-switch active
-- `10`: internal error
+### 2) One-shot execution test (same runtime path)
 
-## State and Persistence
-- Runtime state file: `.trader/state.json`
-- Includes orders, order events, fills, account snapshots, risk events, agent audit, and health history.
-- Stores daily PnL baseline at `settings.dailyPnlBaseline`.
-- Stores account snapshots from:
-  - `account list` command
-  - live-order risk context build
-- Keeps recent balance snapshots (rolling cap) to support fallback when private account fetch fails.
-- Reconcile can backfill missing exchange UUIDs and resolve uncertain submission states.
+```bash
+npm run start:once
+```
+
+### 3) Endpoint smoke check (read-only by default)
+
+```bash
+npm run smoke
+```
+
+This verifies:
+
+- private REST: accounts/chance/orders list
+- public REST: ticker + minute/day/week/month candles
+- public WS: ticker/trade/orderbook
+- private WS: myAsset/myOrder connection-open check
+
+### 4) Optional write smoke (place+cancel)
+
+```bash
+npm run smoke:write
+```
+
+Write smoke is protected by explicit env confirmation:
+
+- `SMOKE_ENABLE_WRITES=true`
+- `SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND`
+
+It places a deep limit buy and cancels it, then checks follow-up order status.
+
+## Paper Trading
+
+- `TRADER_PAPER_MODE=true` enables simulated execution.
+- Default paper starting cash is `1,000,000 KRW`.
+- You can override with `TRADER_PAPER_INITIAL_CASH_KRW`.
+- In paper mode, `account list` returns simulated balances from local state.
+
+## Default Trading Strategy
+
+Default strategy is `risk_managed_momentum`.
+
+- Signal: momentum up -> `BUY`, momentum down -> `SELL`, otherwise `HOLD`
+- Position sizing: volatility-targeted risk multiplier
+- Final order amount: `base amount * signal risk multiplier * AI overlay multiplier`
+- Auto sell is enabled by default (`STRATEGY_AUTO_SELL_ENABLED=true`)
+
+You can still switch to legacy breakout with:
+
+```bash
+STRATEGY_NAME=breakout
+```
+
+## Overlay (AI/ML Output Cache)
+
+Set by external process (AI agent, batch job, research model) in `AI_SETTINGS_FILE`.
+
+Execution reads overlay with timeout guard:
+
+- If overlay is late/stale, fallback multiplier is used
+- Execution never waits indefinitely for AI
+
+## AI Runtime Settings File
+
+AI can control execution settings by writing `AI_SETTINGS_FILE` (default: `.trader/ai-settings.json`).
+The daemon reads this file on each execution window.
+
+Default schema:
+
+```json
+{
+  "version": 1,
+  "updatedAt": "2026-02-15T00:00:00.000Z",
+  "execution": {
+    "enabled": true,
+    "symbol": "BTC_KRW",
+    "orderAmountKrw": 5000,
+    "windowSec": 300,
+    "cooldownSec": 30,
+    "dryRun": false
+  },
+  "strategy": {
+    "name": "risk_managed_momentum",
+    "defaultSymbol": "BTC_KRW",
+    "candleInterval": "15m",
+    "candleCount": 200,
+    "momentumLookback": 36,
+    "volatilityLookback": 96,
+    "momentumEntryBps": 16,
+    "momentumExitBps": 10,
+    "targetVolatilityPct": 0.35,
+    "riskManagedMinMultiplier": 0.4,
+    "riskManagedMaxMultiplier": 1.8,
+    "autoSellEnabled": true,
+    "baseOrderAmountKrw": 5000
+  },
+  "overlay": {
+    "multiplier": 1.0,
+    "score": null,
+    "regime": "risk_on",
+    "note": "set by ai"
+  },
+  "controls": {
+    "killSwitch": false
+  }
+}
+```
+
+Notes:
+
+- AI settings changes are applied at the next window boundary, not per tick.
+- `strategy.*` updates are also applied at window boundary (signal engine is rebuilt safely).
+- Execution path remains deterministic (`MarketData -> Signal -> Risk -> Execution`).
+- In live mode, startup includes account preflight (`account list`) to verify your credentials/account access.
+
+## Safety-First Best Return Search
+
+There is no universal "always best" strategy. This project uses a constrained optimizer:
+
+- objective: maximize score derived from return, drawdown, sharpe, win-rate
+- hard safety filter:
+  - `OPTIMIZER_MAX_DRAWDOWN_PCT`
+  - `OPTIMIZER_MIN_TRADES`
+  - `OPTIMIZER_MIN_WIN_RATE_PCT`
+  - `OPTIMIZER_MIN_PROFIT_FACTOR`
+  - `OPTIMIZER_MIN_RETURN_PCT`
+- output:
+  - `.trader/optimizer-report.json` with top candidates
+  - `.trader/ai-settings.json` updated with chosen symbol + parameters
+
+Optional auto-apply on service start:
+
+```bash
+OPTIMIZER_APPLY_ON_START=true npm start
+```
+
+Daemon re-optimization cadence (during runtime loop):
+
+```bash
+OPTIMIZER_REOPT_ENABLED=true
+OPTIMIZER_REOPT_INTERVAL_SEC=3600
+```
+
+## No CLI Mode
+
+- CLI mode is intentionally removed.
+- Runtime control is file-driven (`.env` + `AI_SETTINGS_FILE`).
+- Runtime observability is log-driven (JSON logs to stdout/stderr).
+- Runtime state is persisted in `TRADER_STATE_FILE` (default `.trader/state.json`).
+
+## WebSocket Coverage
+
+Implemented channels (`bithumb/socket.md`):
+
+- Public: `ticker`, `trade`, `orderbook`
+- Private: `myOrder`, `myAsset`
+
+Default endpoints:
+
+- Public: `BITHUMB_WS_PUBLIC_URL=wss://ws-api.bithumb.com/websocket/v1`
+- Private: `BITHUMB_WS_PRIVATE_URL=wss://ws-api.bithumb.com/websocket/v1/private`
+
+Private streams use JWT header auth (`authorization: Bearer ...`) and documented error frames are surfaced as runtime errors.
+
+## HTTP Audit Log
+
+Each exchange HTTP call is logged to JSONL audit trail:
+
+- enable/disable: `TRADER_HTTP_AUDIT_ENABLED`
+- file path: `TRADER_HTTP_AUDIT_FILE` (default `.trader/http-audit.jsonl`)
+
+Generate aggregated report:
+
+```bash
+npm run audit:report
+```
+
+Report includes:
+
+- endpoint-level success/fail counts
+- average/p95 latency
+- top error messages
+
+## Safety Controls
+
+- `RISK_MIN_ORDER_NOTIONAL_KRW`
+- `RISK_MAX_ORDER_NOTIONAL_KRW`
+- `RISK_MAX_OPEN_ORDERS`
+- `RISK_MAX_EXPOSURE_KRW`
+- `RISK_MAX_DAILY_LOSS_KRW`
+- `TRADER_INITIAL_CAPITAL_KRW` (daily loss baseline)
+- `kill-switch`
 
 ## Testing
+
 ```bash
 npm run lint
 npm test
 ```
-
-## Security Notes
-- Never print or commit API keys.
-- Keep secrets in `.env` or external secret manager.
-- Start in paper mode.
-- Always run `order chance` before live trading.

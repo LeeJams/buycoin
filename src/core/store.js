@@ -16,6 +16,7 @@ function initialState() {
     fills: [],
     balancesSnapshot: [],
     holdings: [],
+    paperWallet: null,
     marketData: {
       ticks: [],
       candles: [],

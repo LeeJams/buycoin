@@ -1,58 +1,41 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadConfig } from "../src/config/defaults.js";
+import { loadConfig, toBithumbMarket, normalizeSymbol } from "../src/config/defaults.js";
 
-test("config defaults include bithumb per-second limits", () => {
+test("defaults include orthodox strategy and overlay settings", () => {
   const config = loadConfig({});
+  assert.equal(config.runtime.paperInitialCashKrw, 1000000);
+  assert.equal(config.runtime.httpAuditEnabled, true);
+  assert.equal(config.runtime.httpAuditFile.endsWith(".trader/http-audit.jsonl"), true);
+  assert.equal(config.strategy.name, "risk_managed_momentum");
+  assert.equal(config.strategy.candleInterval, "15m");
+  assert.equal(config.strategy.momentumLookback, 48);
+  assert.equal(config.strategy.volatilityLookback, 96);
+  assert.equal(config.strategy.autoSellEnabled, true);
+  assert.equal(config.strategy.breakoutLookback, 20);
+  assert.equal(config.overlay.timeoutMs, 500);
   assert.equal(config.exchange.publicMaxPerSec, 150);
   assert.equal(config.exchange.privateMaxPerSec, 140);
+  assert.equal(config.exchange.wsPublicUrl, "wss://ws-api.bithumb.com/websocket/v1");
+  assert.equal(config.exchange.wsPrivateUrl, "wss://ws-api.bithumb.com/websocket/v1/private");
+  assert.equal(config.exchange.wsConnectMaxPerSec, 5);
+  assert.equal(config.ai.enabled, true);
+  assert.equal(config.ai.settingsFile.endsWith(".trader/ai-settings.json"), true);
+  assert.equal(config.ai.applyOverlay, true);
+  assert.equal(config.ai.applyKillSwitch, true);
+  assert.equal(config.execution.enabled, true);
+  assert.equal(config.execution.symbol, "BTC_KRW");
+  assert.equal(config.execution.orderAmountKrw, 5000);
+  assert.equal(config.execution.windowSec, 300);
+  assert.equal(config.execution.cooldownSec, 30);
+  assert.equal(config.execution.dryRun, false);
+  assert.equal(config.execution.maxWindows, 0);
+  assert.equal(config.optimizer.enabled, true);
+  assert.equal(config.optimizer.reoptEnabled, true);
+  assert.equal(config.optimizer.reoptIntervalSec, 3600);
 });
 
-test("invalid per-second limits fall back to safe defaults", () => {
-  const config = loadConfig({
-    BITHUMB_PUBLIC_MAX_PER_SEC: "bad",
-    BITHUMB_PRIVATE_MAX_PER_SEC: "0",
-  });
-
-  assert.equal(config.exchange.publicMaxPerSec, 150);
-  assert.equal(config.exchange.privateMaxPerSec, 140);
-});
-
-test("symbol-specific minimum notional map is parsed from env", () => {
-  const config = loadConfig({
-    RISK_MIN_ORDER_NOTIONAL_BY_SYMBOL: "usdt-krw:1000,BTC_KRW:7000,INVALID,bad:0",
-  });
-
-  assert.deepEqual(config.trading.minOrderNotionalBySymbol, {
-    USDT_KRW: 1000,
-    BTC_KRW: 7000,
-  });
-});
-
-test("resilience defaults are configured", () => {
-  const config = loadConfig({});
-  assert.equal(config.runtime.stateLockStaleMs, 30000);
-  assert.equal(config.runtime.startupReconcile, true);
-  assert.equal(config.resilience.autoRetryEnabled, true);
-  assert.equal(config.resilience.autoRetryAttempts, 2);
-  assert.equal(config.resilience.autoKillSwitchEnabled, true);
-});
-
-test("ai hard cap defaults are configured", () => {
-  const config = loadConfig({});
-  assert.equal(config.trading.aiMaxOrderNotionalKrw, 100000);
-  assert.equal(config.trading.aiMaxOrdersPerWindow, 3);
-  assert.equal(config.trading.aiOrderCountWindowSec, 60);
-  assert.equal(config.trading.aiMaxTotalExposureKrw, 500000);
-});
-
-test("strategy and capital defaults are configured", () => {
-  const config = loadConfig({});
-  assert.equal(config.trading.initialCapitalKrw, null);
-  assert.equal(config.strategy.rsiPeriod, 14);
-  assert.equal(config.strategy.rsiInterval, "15m");
-  assert.equal(config.strategy.rsiCandleCount, 100);
-  assert.equal(config.strategy.rsiOversold, 30);
-  assert.equal(config.strategy.rsiOverbought, 70);
-  assert.equal(config.strategy.defaultOrderAmountKrw, 5000);
+test("symbol conversion helpers work", () => {
+  assert.equal(normalizeSymbol("usdt-krw"), "USDT_KRW");
+  assert.equal(toBithumbMarket("USDT_KRW"), "KRW-USDT");
 });

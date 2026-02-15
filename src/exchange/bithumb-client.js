@@ -125,8 +125,15 @@ function normalizeTs(order = {}) {
   return 0;
 }
 
+function objectKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+  return Object.keys(value).sort();
+}
+
 export class BithumbClient {
-  constructor(config, logger) {
+  constructor(config, logger, options = {}) {
     this.config = config;
     this.logger = logger;
     this.baseUrl = config.exchange.baseUrl;
@@ -141,6 +148,8 @@ export class BithumbClient {
     this.privateLimiter = new PerSecondSlidingWindowLimiter({
       maxPerSec: config.exchange.privateMaxPerSec,
     });
+    this.onRequestEvent = typeof options.onRequestEvent === "function" ? options.onRequestEvent : null;
+    this.nowFn = typeof options.nowFn === "function" ? options.nowFn : () => Date.now();
   }
 
   ensureAuthConfigured() {
@@ -185,10 +194,31 @@ export class BithumbClient {
     return typeof error.status === "number" && error.status >= 500;
   }
 
-  async request({ method = "GET", path, query = {}, body = null, requiresAuth = false }) {
+  emitRequestEvent(event) {
+    if (!this.onRequestEvent) {
+      return;
+    }
+    try {
+      this.onRequestEvent(event);
+    } catch (error) {
+      this.logger.warn("exchange request audit hook failed", {
+        reason: error.message,
+      });
+    }
+  }
+
+  async request({
+    method = "GET",
+    path,
+    query = {},
+    body = null,
+    requiresAuth = false,
+    attempt = 1,
+  }) {
     const methodUpper = method.toUpperCase();
     const queryString = canonicalQuery(query);
     const url = queryString ? `${this.baseUrl}${path}?${queryString}` : `${this.baseUrl}${path}`;
+    const startedAt = this.nowFn();
     const headers = {
       Accept: "application/json",
     };
@@ -224,25 +254,72 @@ export class BithumbClient {
       }
     } catch (error) {
       clearTimeout(timeout);
+      let wrappedError;
       if (error.name === "AbortError") {
-        throw new ExchangeHttpError(`Request timeout: ${methodUpper} ${path}`, {
+        wrappedError = new ExchangeHttpError(`Request timeout: ${methodUpper} ${path}`, {
           retryable: true,
         });
+      } else {
+        wrappedError = new ExchangeHttpError(error.message, { retryable: true });
       }
-      throw new ExchangeHttpError(error.message, { retryable: true });
+
+      this.emitRequestEvent({
+        ts: startedAt,
+        method: methodUpper,
+        path,
+        requiresAuth,
+        attempt,
+        queryKeys: objectKeys(query),
+        bodyKeys: objectKeys(body),
+        ok: false,
+        status: wrappedError.status ?? null,
+        retryable: this.isRetryableError(wrappedError),
+        error: wrappedError.message,
+        durationMs: this.nowFn() - startedAt,
+      });
+      throw wrappedError;
     } finally {
       clearTimeout(timeout);
     }
 
     if (!response.ok) {
       const message = payload?.message || payload?.error?.message || `HTTP ${response.status}`;
-      throw new ExchangeHttpError(message, {
+      const error = new ExchangeHttpError(message, {
         status: response.status,
         payload,
         retryable: response.status === 429 || response.status >= 500,
       });
+      this.emitRequestEvent({
+        ts: startedAt,
+        method: methodUpper,
+        path,
+        requiresAuth,
+        attempt,
+        queryKeys: objectKeys(query),
+        bodyKeys: objectKeys(body),
+        ok: false,
+        status: response.status,
+        retryable: this.isRetryableError(error),
+        error: message,
+        durationMs: this.nowFn() - startedAt,
+      });
+      throw error;
     }
 
+    this.emitRequestEvent({
+      ts: startedAt,
+      method: methodUpper,
+      path,
+      requiresAuth,
+      attempt,
+      queryKeys: objectKeys(query),
+      bodyKeys: objectKeys(body),
+      ok: true,
+      status: response.status,
+      retryable: false,
+      error: null,
+      durationMs: this.nowFn() - startedAt,
+    });
     return payload;
   }
 
@@ -250,7 +327,10 @@ export class BithumbClient {
     let attempt = 0;
     while (attempt <= this.maxRetries) {
       try {
-        return await this.request(req);
+        return await this.request({
+          ...req,
+          attempt: attempt + 1,
+        });
       } catch (error) {
         if (!this.isRetryableError(error) || attempt === this.maxRetries) {
           throw error;
@@ -329,7 +409,7 @@ export class BithumbClient {
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 422) {
+      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
         throw error;
       }
       return fallback();
@@ -337,7 +417,10 @@ export class BithumbClient {
   }
 
   async getOrder({ exchangeOrderId, symbol = null }) {
-    const query = {
+    const queryV1 = {
+      uuid: exchangeOrderId,
+    };
+    const queryV2 = {
       uuid: exchangeOrderId,
       market: symbol ? toBithumbMarket(symbol) : undefined,
     };
@@ -346,7 +429,7 @@ export class BithumbClient {
       this.withRetry({
         method: "GET",
         path: "/v1/order",
-        query,
+        query: queryV1,
         requiresAuth: true,
       });
 
@@ -354,14 +437,14 @@ export class BithumbClient {
       this.withRetry({
         method: "GET",
         path: "/v2/order",
-        query,
+        query: queryV2,
         requiresAuth: true,
       });
 
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 422) {
+      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
         throw error;
       }
       return fallback();
@@ -699,7 +782,7 @@ export class BithumbClient {
     const typeNormalized = String(type || "limit").toLowerCase();
     let ordType = typeNormalized;
 
-    // CLI `type=market` maps to Bithumb:
+    // Internal market type maps to Bithumb:
     // - side=buy  -> ord_type=price (market buy)
     // - side=sell -> ord_type=market (market sell)
     if (typeNormalized === "market" && sideNormalized === "bid") {
@@ -740,7 +823,7 @@ export class BithumbClient {
     const primary = () =>
       this.withRetry({
         method: "POST",
-        path: "/v2/orders",
+        path: "/v1/orders",
         body,
         requiresAuth: true,
       });
@@ -748,7 +831,7 @@ export class BithumbClient {
     const fallback = () =>
       this.withRetry({
         method: "POST",
-        path: "/v1/orders",
+        path: "/v2/orders",
         body,
         requiresAuth: true,
       });
@@ -756,7 +839,7 @@ export class BithumbClient {
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 422) {
+      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
         throw error;
       }
       return fallback();
@@ -764,32 +847,34 @@ export class BithumbClient {
   }
 
   async cancelOrder({ exchangeOrderId, symbol }) {
-    const market = symbol ? toBithumbMarket(symbol) : undefined;
-    const query = {
+    const queryV1 = {
       uuid: exchangeOrderId,
-      market,
+    };
+    const queryV2 = {
+      uuid: exchangeOrderId,
+      market: symbol ? toBithumbMarket(symbol) : undefined,
     };
 
     const primary = () =>
       this.withRetry({
         method: "DELETE",
-        path: "/v2/order",
-        query,
+        path: "/v1/order",
+        query: queryV1,
         requiresAuth: true,
       });
 
     const fallback = () =>
       this.withRetry({
         method: "DELETE",
-        path: "/v1/order",
-        query,
+        path: "/v2/order",
+        query: queryV2,
         requiresAuth: true,
       });
 
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 422) {
+      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
         throw error;
       }
       return fallback();
