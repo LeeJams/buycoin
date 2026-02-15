@@ -28,6 +28,7 @@ test("ai settings source creates template when file is missing", async () => {
 
   assert.equal(parsed.version, 1);
   assert.equal(parsed.execution.symbol, "BTC_KRW");
+  assert.deepEqual(parsed.execution.symbols, ["BTC_KRW"]);
   assert.equal(parsed.execution.orderAmountKrw, 5000);
 });
 
@@ -42,6 +43,7 @@ test("ai settings source reads execution overrides and overlay", async () => {
     execution: {
       enabled: true,
       symbol: "usdt-krw",
+      symbols: ["usdt-krw", "eth-krw"],
       orderAmountKrw: 10000,
       windowSec: 120,
       cooldownSec: 15,
@@ -76,6 +78,7 @@ test("ai settings source reads execution overrides and overlay", async () => {
   const result = await source.read();
 
   assert.equal(result.execution.symbol, "USDT_KRW");
+  assert.deepEqual(result.execution.symbols, ["USDT_KRW", "ETH_KRW"]);
   assert.equal(result.execution.orderAmountKrw, 10000);
   assert.equal(result.execution.windowSec, 120);
   assert.equal(result.execution.cooldownSec, 15);
@@ -87,4 +90,27 @@ test("ai settings source reads execution overrides and overlay", async () => {
   assert.equal(result.strategy.momentumEntryBps, 16);
   assert.equal(result.overlay.multiplier, 0.75);
   assert.equal(result.controls.killSwitch, true);
+});
+
+test("ai settings source accepts comma-separated symbols", async () => {
+  const config = await makeConfig();
+  const source = new AiSettingsSource(config);
+  await source.init();
+
+  const payload = {
+    execution: {
+      enabled: true,
+      symbol: "btc-krw",
+      symbols: "btc-krw,eth-krw,usdt-krw",
+      orderAmountKrw: 5000,
+      windowSec: 120,
+      cooldownSec: 10,
+      dryRun: true,
+    },
+  };
+  await fs.writeFile(config.ai.settingsFile, JSON.stringify(payload, null, 2), "utf8");
+
+  const result = await source.read();
+  assert.equal(result.execution.symbol, "BTC_KRW");
+  assert.deepEqual(result.execution.symbols, ["BTC_KRW", "ETH_KRW", "USDT_KRW"]);
 });

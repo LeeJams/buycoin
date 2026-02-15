@@ -84,6 +84,7 @@ npm start
 
 The service uses `EXECUTION_*` values from `.env` and runs realtime windows continuously.
 When enabled, it also reads AI runtime settings from `.trader/ai-settings.json` every window.
+You can set multi-symbol runtime defaults with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,USDT_KRW`.
 
 ### 2) One-shot execution test (same runtime path)
 
@@ -152,6 +153,7 @@ Execution reads overlay with timeout guard:
 
 AI can control execution settings by writing `AI_SETTINGS_FILE` (default: `.trader/ai-settings.json`).
 The daemon reads this file on each execution window.
+For concurrent multi-symbol execution, set `execution.symbols` (array or comma-separated string).
 
 Default schema:
 
@@ -162,6 +164,7 @@ Default schema:
   "execution": {
     "enabled": true,
     "symbol": "BTC_KRW",
+    "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
     "orderAmountKrw": 5000,
     "windowSec": 300,
     "cooldownSec": 30,

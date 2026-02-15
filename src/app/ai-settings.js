@@ -90,6 +90,25 @@ function normalizeInterval(value, fallback) {
   return ALLOWED_INTERVALS.has(token) ? token : fallback;
 }
 
+function toSymbolArray(value, fallback = []) {
+  const base = Array.isArray(fallback) ? fallback : [];
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : base;
+
+  const normalized = raw
+    .map((item) => normalizeSymbol(String(item || "").trim()))
+    .filter(Boolean);
+
+  const unique = Array.from(new Set(normalized));
+  if (unique.length > 0) {
+    return unique;
+  }
+  return base.length > 0 ? Array.from(new Set(base.map((item) => normalizeSymbol(item)).filter(Boolean))) : [];
+}
+
 function normalizeOverlay(overlayRaw) {
   if (!overlayRaw || typeof overlayRaw !== "object") {
     return null;
@@ -128,9 +147,13 @@ export class AiSettingsSource {
   }
 
   defaultExecution() {
+    const defaultSymbol = normalizeSymbol(this.config.execution.symbol);
+    const configuredSymbols = toSymbolArray(this.config.execution.symbols, [defaultSymbol]);
+    const symbols = configuredSymbols.length > 0 ? configuredSymbols : [defaultSymbol];
     return {
       enabled: Boolean(this.config.execution.enabled),
-      symbol: normalizeSymbol(this.config.execution.symbol),
+      symbol: symbols[0],
+      symbols,
       orderAmountKrw: this.config.execution.orderAmountKrw,
       windowSec: this.config.execution.windowSec,
       cooldownSec: this.config.execution.cooldownSec,
@@ -223,11 +246,18 @@ export class AiSettingsSource {
     const execution = {
       enabled: toBoolean(executionRaw.enabled, defaults.enabled),
       symbol: normalizeSymbol(executionRaw.symbol || defaults.symbol),
+      symbols: [],
       orderAmountKrw: toPositiveNumber(executionRaw.orderAmountKrw, defaults.orderAmountKrw),
       windowSec: toPositiveInt(executionRaw.windowSec, defaults.windowSec),
       cooldownSec: toNonNegativeInt(executionRaw.cooldownSec, defaults.cooldownSec),
       dryRun: toBoolean(executionRaw.dryRun, defaults.dryRun),
     };
+    const symbols = toSymbolArray(executionRaw.symbols, defaults.symbols || [execution.symbol]);
+    if (execution.symbol && !symbols.includes(execution.symbol)) {
+      symbols.unshift(execution.symbol);
+    }
+    execution.symbols = symbols.length > 0 ? symbols : [execution.symbol];
+    execution.symbol = execution.symbols[0];
 
     const strategy = {
       name: normalizeStrategyName(strategyRaw.name, strategyDefaults.name),

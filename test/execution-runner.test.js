@@ -65,6 +65,7 @@ function baseConfig() {
     execution: {
       enabled: true,
       symbol: "BTC_KRW",
+      symbols: ["BTC_KRW"],
       orderAmountKrw: 5000,
       windowSec: 1,
       cooldownSec: 1,
@@ -118,6 +119,7 @@ test("execution service applies ai execution settings per window", async () => {
     execution: {
       enabled: true,
       symbol: "USDT_KRW",
+      symbols: ["USDT_KRW"],
       orderAmountKrw: 7000,
       windowSec: 2,
       cooldownSec: 0,
@@ -160,4 +162,37 @@ test("execution service applies ai execution settings per window", async () => {
   assert.equal(system.calls.args[0].durationSec, 2);
   assert.equal(system.calls.args[0].cooldownSec, 0);
   assert.equal(system.calls.args[0].dryRun, false);
+});
+
+test("execution service runs multiple symbols in one window when ai settings provide symbols", async () => {
+  const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "execution-ai-multi-"));
+  const settingsFile = path.join(baseDir, "ai-settings.json");
+  const payload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    execution: {
+      enabled: true,
+      symbol: "BTC_KRW",
+      symbols: ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
+      orderAmountKrw: 7000,
+      windowSec: 2,
+      cooldownSec: 0,
+      dryRun: true,
+    },
+  };
+  await fs.writeFile(settingsFile, JSON.stringify(payload, null, 2), "utf8");
+
+  const config = baseConfig();
+  config.ai.enabled = true;
+  config.ai.settingsFile = settingsFile;
+  config.execution.maxWindows = 1;
+
+  const system = new SystemMock();
+  const result = await runExecutionService({ system, config });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.windows, 1);
+  assert.equal(system.calls.realtime, 3);
+  const symbols = system.calls.args.map((row) => row.symbol).sort();
+  assert.deepEqual(symbols, ["BTC_KRW", "ETH_KRW", "USDT_KRW"]);
 });

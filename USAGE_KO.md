@@ -30,12 +30,14 @@ npm install
 - 엔드포인트 스모크 점검(주문+취소): `npm run smoke:write`
 - HTTP 감사로그 요약 리포트: `npm run audit:report`
 - 페이퍼 모드 기본 초기자금: `1,000,000 KRW` (`TRADER_PAPER_INITIAL_CASH_KRW`로 변경 가능)
+- 기본 다중 종목은 `.env`의 `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,...` 로 지정 가능합니다.
 
 ## AI 설정 연동(자동매매 설정 입력점)
 
 - 기본 파일: `.trader/ai-settings.json`
 - 실행 루프는 매 윈도우 시작 시 이 파일을 읽습니다.
 - AI는 이 파일만 갱신하면 종목/주문금액/윈도우/쿨다운/드라이런/킬스위치를 제어할 수 있습니다.
+- 동시 다중 종목 실행은 `execution.symbols` 배열(또는 콤마 문자열)로 지정합니다.
 
 예시:
 
@@ -46,6 +48,7 @@ npm install
   "execution": {
     "enabled": true,
     "symbol": "USDT_KRW",
+    "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
     "orderAmountKrw": 7000,
     "windowSec": 180,
     "cooldownSec": 20,

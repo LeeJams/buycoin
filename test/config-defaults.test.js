@@ -25,6 +25,7 @@ test("defaults include orthodox strategy and overlay settings", () => {
   assert.equal(config.ai.applyKillSwitch, true);
   assert.equal(config.execution.enabled, true);
   assert.equal(config.execution.symbol, "BTC_KRW");
+  assert.deepEqual(config.execution.symbols, ["BTC_KRW"]);
   assert.equal(config.execution.orderAmountKrw, 5000);
   assert.equal(config.execution.windowSec, 300);
   assert.equal(config.execution.cooldownSec, 30);

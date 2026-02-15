@@ -216,6 +216,10 @@ export function loadConfig(env = process.env) {
     execution: {
       enabled: toBoolean(env.EXECUTION_ENABLED, true),
       symbol: normalizeSymbol(env.EXECUTION_SYMBOL || env.STRATEGY_SYMBOL || env.TRADER_DEFAULT_SYMBOL || "BTC_KRW"),
+      symbols: toCsvSymbols(
+        env.EXECUTION_SYMBOLS,
+        [normalizeSymbol(env.EXECUTION_SYMBOL || env.STRATEGY_SYMBOL || env.TRADER_DEFAULT_SYMBOL || "BTC_KRW")],
+      ),
       orderAmountKrw: toPositiveNumber(
         env.EXECUTION_ORDER_AMOUNT_KRW,
         toPositiveNumber(env.STRATEGY_BASE_ORDER_AMOUNT_KRW, 5_000),

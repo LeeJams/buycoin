@@ -30,12 +30,14 @@ Configure `.env` from `.env.example`.
 - Endpoint smoke check (write place+cancel): `npm run smoke:write`
 - HTTP audit summary report: `npm run audit:report`
 - Paper mode default starting cash: `1,000,000 KRW` (override with `TRADER_PAPER_INITIAL_CASH_KRW`)
+- You can set default multi-symbol execution via `.env` with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,...`.
 
 ## AI Settings Bridge (runtime input for automation)
 
 - Default file: `.trader/ai-settings.json`
 - The daemon reads this file at each execution window.
 - AI can control symbol/order notional/window/cooldown/dry-run/kill-switch by updating this file.
+- For concurrent multi-symbol execution, set `execution.symbols` (array or comma-separated string).
 
 Example:
 
@@ -46,6 +48,7 @@ Example:
   "execution": {
     "enabled": true,
     "symbol": "USDT_KRW",
+    "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
     "orderAmountKrw": 7000,
     "windowSec": 180,
     "cooldownSec": 20,

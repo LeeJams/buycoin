@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "../config/env-loader.js";
-import { loadConfig } from "../config/defaults.js";
+import { loadConfig, normalizeSymbol } from "../config/defaults.js";
 import { EXIT_CODES, codeName } from "../config/exit-codes.js";
 import { TradingSystem } from "../core/trading-system.js";
 import { BithumbClient } from "../exchange/bithumb-client.js";
@@ -20,6 +20,63 @@ function toPositiveInt(value, fallback) {
     return fallback;
   }
   return Math.max(1, Math.floor(parsed));
+}
+
+function normalizeSymbolList(symbols, fallbackSymbol = "BTC_KRW") {
+  let source = [];
+  if (Array.isArray(symbols)) {
+    source = symbols;
+  } else if (typeof symbols === "string") {
+    source = symbols.split(",");
+  }
+
+  const normalized = source
+    .map((item) => normalizeSymbol(String(item || "").trim()))
+    .filter(Boolean);
+
+  const unique = Array.from(new Set(normalized));
+  if (unique.length > 0) {
+    return unique;
+  }
+  return [normalizeSymbol(fallbackSymbol)];
+}
+
+function aggregateWindowResults(results = []) {
+  const successful = [];
+  const failed = [];
+
+  for (const row of results) {
+    if (row?.result?.ok) {
+      successful.push(row);
+    } else {
+      failed.push(row);
+    }
+  }
+
+  const totals = successful.reduce(
+    (acc, row) => {
+      const data = row.result?.data || {};
+      acc.tickCount += Number(data.tickCount || 0);
+      acc.buySignals += Number(data.buySignals || 0);
+      acc.sellSignals += Number(data.sellSignals || 0);
+      acc.attemptedOrders += Number(data.attemptedOrders || 0);
+      acc.successfulOrders += Number(data.successfulOrders || 0);
+      return acc;
+    },
+    {
+      tickCount: 0,
+      buySignals: 0,
+      sellSignals: 0,
+      attemptedOrders: 0,
+      successfulOrders: 0,
+    },
+  );
+
+  return {
+    successful,
+    failed,
+    totals,
+  };
 }
 
 function ensureLiveCredentials(config) {
@@ -122,6 +179,7 @@ export async function runExecutionService({ system = null, config = null } = {})
     logger.info("execution service started", {
       mode: runtimeConfig.runtime.paperMode ? "paper" : "live",
       symbol: runtimeConfig.execution.symbol,
+      symbols: normalizeSymbolList(runtimeConfig.execution.symbols, runtimeConfig.execution.symbol),
       amountKrw: runtimeConfig.execution.orderAmountKrw,
       windowSec: runtimeConfig.execution.windowSec,
       cooldownSec: runtimeConfig.execution.cooldownSec,
@@ -256,35 +314,67 @@ export async function runExecutionService({ system = null, config = null } = {})
         continue;
       }
 
-      const result = await trader.runStrategyRealtime({
-        symbol: effective.symbol,
-        amount: effective.orderAmountKrw,
-        durationSec: effective.windowSec,
-        cooldownSec: effective.cooldownSec,
-        dryRun: effective.dryRun,
-      });
+      const targetSymbols = normalizeSymbolList(effective.symbols, effective.symbol);
+      const perSymbolResults = await Promise.all(
+        targetSymbols.map(async (targetSymbol) => {
+          const result = await trader.runStrategyRealtime({
+            symbol: targetSymbol,
+            amount: effective.orderAmountKrw,
+            durationSec: effective.windowSec,
+            cooldownSec: effective.cooldownSec,
+            dryRun: effective.dryRun,
+          });
+          return {
+            symbol: targetSymbol,
+            result,
+          };
+        }),
+      );
 
-      if (result.ok) {
+      const aggregated = aggregateWindowResults(perSymbolResults);
+      if (aggregated.failed.length === 0) {
         logger.info("execution window completed", {
           window: windows,
           source: aiRuntime.source,
-          symbol: effective.symbol,
+          symbols: targetSymbols,
+          symbolCount: targetSymbols.length,
           amountKrw: effective.orderAmountKrw,
           dryRun: effective.dryRun,
-          tickCount: result.data.tickCount,
-          buySignals: result.data.buySignals,
-          sellSignals: result.data.sellSignals,
-          attemptedOrders: result.data.attemptedOrders,
-          successfulOrders: result.data.successfulOrders,
+          tickCount: aggregated.totals.tickCount,
+          buySignals: aggregated.totals.buySignals,
+          sellSignals: aggregated.totals.sellSignals,
+          attemptedOrders: aggregated.totals.attemptedOrders,
+          successfulOrders: aggregated.totals.successfulOrders,
+          perSymbol: perSymbolResults.map((row) => ({
+            symbol: row.symbol,
+            ok: row.result?.ok === true,
+            code: row.result?.code ?? null,
+            tickCount: row.result?.data?.tickCount ?? 0,
+            buySignals: row.result?.data?.buySignals ?? 0,
+            sellSignals: row.result?.data?.sellSignals ?? 0,
+            attemptedOrders: row.result?.data?.attemptedOrders ?? 0,
+            successfulOrders: row.result?.data?.successfulOrders ?? 0,
+          })),
         });
       } else {
         logger.error("execution window failed", {
           window: windows,
           source: aiRuntime.source,
-          symbol: effective.symbol,
-          code: result.code,
-          codeName: codeName(result.code),
-          error: result.error,
+          symbols: targetSymbols,
+          symbolCount: targetSymbols.length,
+          amountKrw: effective.orderAmountKrw,
+          dryRun: effective.dryRun,
+          tickCount: aggregated.totals.tickCount,
+          buySignals: aggregated.totals.buySignals,
+          sellSignals: aggregated.totals.sellSignals,
+          attemptedOrders: aggregated.totals.attemptedOrders,
+          successfulOrders: aggregated.totals.successfulOrders,
+          failures: aggregated.failed.map((row) => ({
+            symbol: row.symbol,
+            code: row.result?.code ?? null,
+            codeName: codeName(row.result?.code ?? EXIT_CODES.INTERNAL_ERROR),
+            error: row.result?.error || null,
+          })),
         });
       }
 
