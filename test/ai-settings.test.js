@@ -47,7 +47,6 @@ test("ai settings source reads execution overrides and overlay", async () => {
       orderAmountKrw: 10000,
       windowSec: 120,
       cooldownSec: 15,
-      dryRun: false,
     },
     strategy: {
       name: "risk_managed_momentum",
@@ -63,6 +62,22 @@ test("ai settings source reads execution overrides and overlay", async () => {
       riskManagedMaxMultiplier: 1.7,
       autoSellEnabled: true,
       baseOrderAmountKrw: 7000,
+    },
+    decision: {
+      mode: "override",
+      allowBuy: true,
+      allowSell: false,
+      forceAction: "buy",
+      forceAmountKrw: 9000,
+      forceOnce: true,
+      symbols: {
+        "eth-krw": {
+          mode: "filter",
+          allowBuy: false,
+          allowSell: true,
+          note: "rotation",
+        },
+      },
     },
     overlay: {
       multiplier: 0.75,
@@ -82,12 +97,16 @@ test("ai settings source reads execution overrides and overlay", async () => {
   assert.equal(result.execution.orderAmountKrw, 10000);
   assert.equal(result.execution.windowSec, 120);
   assert.equal(result.execution.cooldownSec, 15);
-  assert.equal(result.execution.dryRun, false);
   assert.equal(result.strategy.name, "risk_managed_momentum");
   assert.equal(result.strategy.defaultSymbol, "ETH_KRW");
   assert.equal(result.strategy.candleInterval, "5m");
   assert.equal(result.strategy.momentumLookback, 36);
   assert.equal(result.strategy.momentumEntryBps, 16);
+  assert.equal(result.decision.mode, "override");
+  assert.equal(result.decision.forceAction, "BUY");
+  assert.equal(result.decision.forceAmountKrw, 9000);
+  assert.equal(result.decision.symbols.ETH_KRW.allowBuy, false);
+  assert.equal(result.decision.symbols.ETH_KRW.allowSell, true);
   assert.equal(result.overlay.multiplier, 0.75);
   assert.equal(result.controls.killSwitch, true);
 });
@@ -105,7 +124,6 @@ test("ai settings source accepts comma-separated symbols", async () => {
       orderAmountKrw: 5000,
       windowSec: 120,
       cooldownSec: 10,
-      dryRun: true,
     },
   };
   await fs.writeFile(config.ai.settingsFile, JSON.stringify(payload, null, 2), "utf8");

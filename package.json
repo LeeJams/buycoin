@@ -5,11 +5,6 @@
   "type": "module",
   "scripts": {
     "start": "node ./src/app/run.js",
-    "start:once": "EXECUTION_MAX_WINDOWS=1 node ./src/app/run.js",
-    "optimize": "node ./src/app/optimize.js",
-    "smoke": "node ./src/app/smoke.js",
-    "smoke:write": "SMOKE_ENABLE_WRITES=true SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND node ./src/app/smoke.js",
-    "audit:report": "node ./src/app/audit-report.js",
     "test": "node --test",
     "lint": "eslint src test scripts test-utils"
   },

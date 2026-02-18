@@ -182,6 +182,9 @@ async function runSmoke() {
 
   const auditLog = new HttpAuditLog(config.runtime.httpAuditFile, logger, {
     enabled: config.runtime.httpAuditEnabled,
+    maxBytes: config.runtime.httpAuditMaxBytes,
+    pruneRatio: config.runtime.httpAuditPruneRatio,
+    checkEvery: config.runtime.httpAuditCheckEvery,
   });
   await auditLog.init();
 

@@ -26,6 +26,7 @@ const ALLOWED_INTERVALS = new Set([
   "week",
   "month",
 ]);
+const ALLOWED_DECISION_MODES = new Set(["rule", "filter", "override"]);
 
 function asNumber(value, fallback = null) {
   if (value === undefined || value === null || value === "") {
@@ -61,6 +62,39 @@ function normalizeStrategyName(value, fallback) {
 function normalizeInterval(value, fallback) {
   const token = String(value || fallback || "15m").trim().toLowerCase();
   return ALLOWED_INTERVALS.has(token) ? token : fallback;
+}
+
+function normalizeDecisionMode(value, fallback = "filter") {
+  const token = String(value || fallback || "filter")
+    .trim()
+    .toLowerCase();
+  return ALLOWED_DECISION_MODES.has(token) ? token : fallback;
+}
+
+function normalizeForceAction(value) {
+  const token = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (["buy", "bid"].includes(token)) {
+    return "BUY";
+  }
+  if (["sell", "ask"].includes(token)) {
+    return "SELL";
+  }
+  return null;
+}
+
+function normalizeExecutionPolicy(policy = {}, { autoSellEnabled = true } = {}) {
+  const raw = policy && typeof policy === "object" ? policy : {};
+  return {
+    mode: normalizeDecisionMode(raw.mode, "filter"),
+    allowBuy: raw.allowBuy === undefined ? true : Boolean(raw.allowBuy),
+    allowSell: raw.allowSell === undefined ? Boolean(autoSellEnabled) : Boolean(raw.allowSell),
+    forceAction: normalizeForceAction(raw.forceAction),
+    forceAmountKrw: asPositiveNumber(raw.forceAmountKrw, null),
+    forceOnce: raw.forceOnce === undefined ? true : Boolean(raw.forceOnce),
+    note: raw.note ? String(raw.note) : null,
+  };
 }
 
 function toDateByTimezone(timezone) {
@@ -122,6 +156,26 @@ function computeQtyFromAmount(amountKrw, price) {
     return null;
   }
   return Number((amountKrw / price).toFixed(8));
+}
+
+function floorToDecimals(value, decimals = 8) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  const safeDecimals = Number.isFinite(decimals) ? Math.max(0, Math.floor(decimals)) : 8;
+  const factor = 10 ** safeDecimals;
+  return Math.floor(value * factor) / factor;
+}
+
+function trimTail(rows, limit) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  const cap = asPositiveInt(limit, null);
+  if (!Number.isFinite(cap) || cap <= 0) {
+    return rows;
+  }
+  return rows.length > cap ? rows.slice(-cap) : rows;
 }
 
 function normalizePaperWallet(wallet, initialCashKrw) {
@@ -229,8 +283,8 @@ function requiredRealtimePriceWindow(config) {
   if (strategyName === "breakout") {
     return Math.max(2, Math.floor(asNumber(config?.strategy?.breakoutLookback, 20)) + 1);
   }
-  const momentum = Math.floor(asNumber(config?.strategy?.momentumLookback, 48));
-  const volatility = Math.floor(asNumber(config?.strategy?.volatilityLookback, 96));
+  const momentum = Math.floor(asNumber(config?.strategy?.momentumLookback, 24));
+  const volatility = Math.floor(asNumber(config?.strategy?.volatilityLookback, 72));
   return Math.max(2, momentum + 1, volatility + 1);
 }
 
@@ -310,22 +364,26 @@ function normalizeRuntimeStrategy(input = {}, fallback = {}) {
     candleCount: asPositiveInt(strategy.candleCount, asPositiveInt(base.candleCount, 120)),
     breakoutLookback: asPositiveInt(strategy.breakoutLookback, asPositiveInt(base.breakoutLookback, 20)),
     breakoutBufferBps: asPositiveNumber(strategy.breakoutBufferBps, asPositiveNumber(base.breakoutBufferBps, 5)),
-    momentumLookback: asPositiveInt(strategy.momentumLookback, asPositiveInt(base.momentumLookback, 48)),
-    volatilityLookback: asPositiveInt(strategy.volatilityLookback, asPositiveInt(base.volatilityLookback, 96)),
-    momentumEntryBps: asPositiveNumber(strategy.momentumEntryBps, asPositiveNumber(base.momentumEntryBps, 20)),
-    momentumExitBps: asPositiveNumber(strategy.momentumExitBps, asPositiveNumber(base.momentumExitBps, 10)),
-    targetVolatilityPct: asPositiveNumber(strategy.targetVolatilityPct, asPositiveNumber(base.targetVolatilityPct, 0.35)),
+    momentumLookback: asPositiveInt(strategy.momentumLookback, asPositiveInt(base.momentumLookback, 24)),
+    volatilityLookback: asPositiveInt(strategy.volatilityLookback, asPositiveInt(base.volatilityLookback, 72)),
+    momentumEntryBps: asPositiveNumber(strategy.momentumEntryBps, asPositiveNumber(base.momentumEntryBps, 12)),
+    momentumExitBps: asPositiveNumber(strategy.momentumExitBps, asPositiveNumber(base.momentumExitBps, 8)),
+    targetVolatilityPct: asPositiveNumber(strategy.targetVolatilityPct, asPositiveNumber(base.targetVolatilityPct, 0.6)),
     riskManagedMinMultiplier: asPositiveNumber(
       strategy.riskManagedMinMultiplier,
-      asPositiveNumber(base.riskManagedMinMultiplier, 0.4),
+      asPositiveNumber(base.riskManagedMinMultiplier, 0.6),
     ),
     riskManagedMaxMultiplier: asPositiveNumber(
       strategy.riskManagedMaxMultiplier,
-      asPositiveNumber(base.riskManagedMaxMultiplier, 1.8),
+      asPositiveNumber(base.riskManagedMaxMultiplier, 2.2),
     ),
     autoSellEnabled: strategy.autoSellEnabled === undefined
       ? base.autoSellEnabled !== false
       : Boolean(strategy.autoSellEnabled),
+    sellAllOnExit: strategy.sellAllOnExit === undefined
+      ? base.sellAllOnExit !== false
+      : Boolean(strategy.sellAllOnExit),
+    sellAllQtyPrecision: asPositiveInt(strategy.sellAllQtyPrecision, asPositiveInt(base.sellAllQtyPrecision, 8)),
     baseOrderAmountKrw: asPositiveNumber(strategy.baseOrderAmountKrw, asPositiveNumber(base.baseOrderAmountKrw, 5_000)),
   };
 }
@@ -350,6 +408,62 @@ export class TradingSystem {
     this.riskEngine = deps.riskEngine || new TraditionalRiskEngine(config);
     this.executionEngine = deps.executionEngine || new ExecutionEngine(this.exchangeClient);
     this.sleepFn = deps.sleepFn || sleep;
+  }
+
+  applyStateRetention(state) {
+    const retention = this.config?.runtime?.retention || {};
+    if (retention.keepLatestOnly) {
+      const openStates = openOrderStates();
+      const orders = Array.isArray(state.orders) ? state.orders : [];
+      const openOrders = orders.filter((order) => openStates.has(order?.state));
+      const closedOrders = orders.filter((order) => !openStates.has(order?.state));
+      const keepClosedOrders = trimTail(closedOrders, retention.closedOrders);
+
+      const compactOrders = [];
+      const seenOrderKey = new Set();
+      for (const order of [...openOrders, ...keepClosedOrders]) {
+        const key = order?.id || order?.exchangeOrderId || order?.clientOrderKey || null;
+        if (key && seenOrderKey.has(key)) {
+          continue;
+        }
+        if (key) {
+          seenOrderKey.add(key);
+        }
+        compactOrders.push(order);
+      }
+      state.orders = compactOrders;
+
+      const knownOrderIds = new Set(state.orders.map((order) => order?.id).filter(Boolean));
+      const knownOrderKeys = new Set(state.orders.map((order) => order?.clientOrderKey).filter(Boolean));
+      const orderEvents = Array.isArray(state.orderEvents) ? state.orderEvents : [];
+      const filteredEvents = orderEvents.filter((event) => {
+        if (knownOrderIds.has(event?.orderId)) {
+          return true;
+        }
+        const key = event?.payload?.clientOrderKey;
+        return key ? knownOrderKeys.has(key) : false;
+      });
+      state.orderEvents = trimTail(filteredEvents, retention.orderEvents);
+
+      state.strategyRuns = trimTail(state.strategyRuns, 1);
+      state.balancesSnapshot = trimTail(state.balancesSnapshot, 1);
+      state.fills = trimTail(state.fills, retention.fills);
+      state.riskEvents = trimTail(state.riskEvents, 100);
+      state.systemHealth = trimTail(state.systemHealth, 100);
+      state.agentAudit = trimTail(state.agentAudit, 100);
+      if (state.marketData && typeof state.marketData === "object") {
+        state.marketData.ticks = [];
+        state.marketData.candles = [];
+      }
+      return state;
+    }
+
+    state.orders = trimTail(state.orders, retention.orders);
+    state.orderEvents = trimTail(state.orderEvents, retention.orderEvents);
+    state.strategyRuns = trimTail(state.strategyRuns, retention.strategyRuns);
+    state.balancesSnapshot = trimTail(state.balancesSnapshot, retention.balancesSnapshot);
+    state.fills = trimTail(state.fills, retention.fills);
+    return state;
   }
 
   async init() {
@@ -377,7 +491,7 @@ export class TradingSystem {
       if (!state.settings.dailyPnlBaseline) {
         state.settings.dailyPnlBaseline = null;
       }
-      return state;
+      return this.applyStateRetention(state);
     });
   }
 
@@ -424,6 +538,8 @@ export class TradingSystem {
           interval: this.config.strategy.candleInterval,
           lookback: this.config.strategy.breakoutLookback,
           baseOrderAmountKrw: this.config.strategy.baseOrderAmountKrw,
+          sellAllOnExit: this.config.strategy.sellAllOnExit !== false,
+          sellAllQtyPrecision: this.config.strategy.sellAllQtyPrecision,
         },
         overlay: state.system?.overlayCache || null,
         dailyPnlBaseline: state.settings.dailyPnlBaseline || null,
@@ -493,6 +609,8 @@ export class TradingSystem {
       volatilityLookback: normalized.volatilityLookback,
       momentumEntryBps: normalized.momentumEntryBps,
       momentumExitBps: normalized.momentumExitBps,
+      sellAllOnExit: normalized.sellAllOnExit,
+      sellAllQtyPrecision: normalized.sellAllQtyPrecision,
     });
     return {
       ok: true,
@@ -607,6 +725,7 @@ export class TradingSystem {
     durationSec = 300,
     cooldownSec = 30,
     dryRun = false,
+    executionPolicy = null,
   } = {}) {
     const runId = uuid();
     const normalizedSymbol = normalizeSymbol(symbol || this.config.strategy.defaultSymbol);
@@ -615,6 +734,9 @@ export class TradingSystem {
     const cooldownMs = Math.max(0, Math.floor(Number(cooldownSec) * 1000));
     const durationMs = Number.isFinite(Number(durationSec)) ? Math.max(0, Math.floor(Number(durationSec)) * 1000) : 300_000;
     const autoSellEnabled = this.config.strategy.autoSellEnabled !== false;
+    const aiPolicy = normalizeExecutionPolicy(executionPolicy, {
+      autoSellEnabled,
+    });
 
     await this.store.update((state) => {
       state.strategyRuns.push({
@@ -626,10 +748,7 @@ export class TradingSystem {
         dryRun: Boolean(dryRun),
         status: "RUNNING",
       });
-      if (state.strategyRuns.length > 1000) {
-        state.strategyRuns = state.strategyRuns.slice(-1000);
-      }
-      return state;
+      return this.applyStateRetention(state);
     });
 
     const prices = [];
@@ -644,6 +763,7 @@ export class TradingSystem {
     let streamHandle = null;
     let timer = null;
     let processing = Promise.resolve();
+    let overrideActionConsumed = false;
 
     try {
       streamHandle = await this.wsClient.openTickerStream({
@@ -662,24 +782,53 @@ export class TradingSystem {
               }
 
               const signal = this.signalEngine.evaluate(candlesFromPrices(prices));
-              const actionable =
-                signal.action === "BUY" || (autoSellEnabled && signal.action === "SELL");
-              if (!actionable) {
-                return;
-              }
-
               if (signal.action === "BUY") {
                 buySignals += 1;
               } else {
                 sellSignals += 1;
               }
+
+              let selectedAction = null;
+              let selectedReason = signal.reason;
+              let selectedSource = "rule_signal";
+              const canUseOverride =
+                aiPolicy.mode === "override" &&
+                aiPolicy.forceAction &&
+                !(aiPolicy.forceOnce && overrideActionConsumed);
+
+              if (canUseOverride) {
+                selectedAction = aiPolicy.forceAction;
+                selectedReason = aiPolicy.note || "ai_override";
+                selectedSource = "ai_override";
+              } else if (signal.action === "BUY") {
+                if (aiPolicy.allowBuy) {
+                  selectedAction = "BUY";
+                } else {
+                  selectedReason = "ai_filter_block_buy";
+                }
+              } else if (signal.action === "SELL") {
+                if (!autoSellEnabled) {
+                  selectedReason = "auto_sell_disabled";
+                } else if (aiPolicy.allowSell) {
+                  selectedAction = "SELL";
+                } else {
+                  selectedReason = "ai_filter_block_sell";
+                }
+              }
+
+              if (!selectedAction) {
+                return;
+              }
+
               const nowMs = Date.now();
               if (cooldownMs > 0 && nowMs - lastOrderAtMs < cooldownMs) {
                 decisions.push({
                   at: nowIso(),
                   price: tick.tradePrice,
                   signal: signal.action,
-                  side: signal.action === "SELL" ? "sell" : "buy",
+                  action: selectedAction,
+                  actionSource: selectedSource,
+                  side: selectedAction === "SELL" ? "sell" : "buy",
                   skipped: "cooldown",
                 });
                 if (decisions.length > 100) {
@@ -689,22 +838,63 @@ export class TradingSystem {
               }
 
               const overlay = await this.resolveOverlay();
-              const baseAmount = asNumber(amount, null) ?? this.config.strategy.baseOrderAmountKrw;
-              const signalMultiplier = signalRiskMultiplier(signal, this.config);
-              const totalMultiplier = Math.max(0.01, overlay.multiplier * signalMultiplier);
+              const aiOverrideAmount =
+                selectedSource === "ai_override" ? asPositiveNumber(aiPolicy.forceAmountKrw, null) : null;
+              const baseAmount =
+                aiOverrideAmount ?? asNumber(amount, null) ?? this.config.strategy.baseOrderAmountKrw;
+              const signalMultiplier =
+                selectedSource === "ai_override" ? 1 : signalRiskMultiplier(signal, this.config);
+              const totalMultiplier =
+                selectedSource === "ai_override" && aiOverrideAmount !== null
+                  ? 1
+                  : Math.max(0.01, overlay.multiplier * signalMultiplier);
               const adjustedAmount = Math.max(1, Math.round(baseAmount * totalMultiplier));
+              const orderSide = selectedAction === "SELL" ? "sell" : "buy";
+              let orderAmountKrw = adjustedAmount;
+              let sellPlan = null;
+
+              if (orderSide === "sell") {
+                sellPlan = await this.resolveSellOrderAmount({
+                  symbol: normalizedSymbol,
+                  price: tick.tradePrice,
+                  fallbackAmountKrw: adjustedAmount,
+                });
+                orderAmountKrw = asNumber(sellPlan.amountKrw, adjustedAmount);
+                if (!Number.isFinite(orderAmountKrw) || orderAmountKrw <= 0) {
+                  if (selectedSource === "ai_override" && aiPolicy.forceOnce) {
+                    overrideActionConsumed = true;
+                  }
+                  decisions.push({
+                    at: nowIso(),
+                    price: tick.tradePrice,
+                    signal: signal.action,
+                    action: selectedAction,
+                    actionSource: selectedSource,
+                    side: orderSide,
+                    skipped: "no_position",
+                    sellPlan,
+                  });
+                  if (decisions.length > 100) {
+                    decisions.shift();
+                  }
+                  return;
+                }
+              }
+
               attemptedOrders += 1;
-              const orderSide = signal.action === "SELL" ? "sell" : "buy";
 
               const order = await this.placeOrder({
                 symbol: normalizedSymbol,
                 side: orderSide,
                 type: "market",
-                amount: adjustedAmount,
+                amount: orderAmountKrw,
                 price: orderSide === "sell" ? tick.tradePrice : null,
                 dryRun,
-                reason: `strategy:${this.config.strategy.name}:realtime:${signal.reason}`,
+                reason: `strategy:${this.config.strategy.name}:realtime:${selectedReason}`,
               });
+              if (selectedSource === "ai_override" && aiPolicy.forceOnce) {
+                overrideActionConsumed = true;
+              }
 
               if (order.ok) {
                 successfulOrders += 1;
@@ -715,12 +905,17 @@ export class TradingSystem {
                 at: nowIso(),
                 price: tick.tradePrice,
                 signal: signal.action,
+                action: selectedAction,
+                actionSource: selectedSource,
+                actionReason: selectedReason,
                 side: orderSide,
                 amountBaseKrw: baseAmount,
                 amountAdjustedKrw: adjustedAmount,
+                amountSubmittedKrw: orderAmountKrw,
                 overlayMultiplier: overlay.multiplier,
                 signalMultiplier,
                 totalMultiplier,
+                sellPlan,
                 orderOk: order.ok,
                 orderCode: order.code,
                 error: order.ok ? null : order.error,
@@ -786,6 +981,7 @@ export class TradingSystem {
         attemptedOrders,
         successfulOrders,
         dryRun: Boolean(dryRun),
+        executionPolicy: aiPolicy,
         decisions,
       };
 
@@ -930,10 +1126,7 @@ export class TradingSystem {
         capturedAt,
         items: accounts,
       });
-      if (state.balancesSnapshot.length > 200) {
-        state.balancesSnapshot = state.balancesSnapshot.slice(-200);
-      }
-      return state;
+      return this.applyStateRetention(state);
     });
     return capturedAt;
   }
@@ -990,6 +1183,65 @@ export class TradingSystem {
         warning: error.message,
       };
     }
+  }
+
+  async resolveSellOrderAmount({
+    symbol,
+    price,
+    fallbackAmountKrw,
+  } = {}) {
+    const fallback = {
+      amountKrw: fallbackAmountKrw,
+      source: "fallback_amount",
+      availableQty: null,
+    };
+
+    if (this.config.strategy.sellAllOnExit === false) {
+      return fallback;
+    }
+
+    const normalizedSymbol = normalizeSymbol(symbol || this.config.strategy.defaultSymbol);
+    const [baseCurrency] = normalizedSymbol.split("_");
+    const resolvedPrice = asNumber(price, null);
+    if (!baseCurrency || resolvedPrice === null || resolvedPrice <= 0) {
+      return fallback;
+    }
+
+    const accountContext = await this.loadAccountContext();
+    let availableQty = 0;
+    for (const account of accountContext.accounts || []) {
+      const currency = String(account.currency || "").trim().toUpperCase();
+      const unitCurrency = String(account.unitCurrency || "KRW").trim().toUpperCase();
+      if (currency !== baseCurrency || unitCurrency !== "KRW") {
+        continue;
+      }
+      availableQty += Math.max(asNumber(account.balance, 0), 0);
+    }
+
+    const qtyPrecision = asPositiveInt(this.config.strategy.sellAllQtyPrecision, 8);
+    const flooredQty = floorToDecimals(availableQty, qtyPrecision);
+    if (!Number.isFinite(flooredQty) || flooredQty <= 0) {
+      return {
+        amountKrw: 0,
+        source: "sell_all_no_position",
+        availableQty: 0,
+      };
+    }
+
+    const amountKrw = flooredQty * resolvedPrice;
+    if (!Number.isFinite(amountKrw) || amountKrw <= 0) {
+      return {
+        amountKrw: 0,
+        source: "sell_all_invalid_notional",
+        availableQty: flooredQty,
+      };
+    }
+
+    return {
+      amountKrw,
+      source: "sell_all_available_qty",
+      availableQty: flooredQty,
+    };
   }
 
   async resolveDailyPnl(equityKrw) {
@@ -1253,9 +1505,6 @@ export class TradingSystem {
         updatedAt: nowIso(),
         metadata,
       });
-      if (state.orders.length > 2000) {
-        state.orders = state.orders.slice(-2000);
-      }
 
       state.orderEvents.push({
         id: uuid(),
@@ -1269,10 +1518,7 @@ export class TradingSystem {
           amountKrw: orderRecord.amountKrw,
         },
       });
-      if (state.orderEvents.length > 5000) {
-        state.orderEvents = state.orderEvents.slice(-5000);
-      }
-      return state;
+      return this.applyStateRetention(state);
     });
   }
 
@@ -1387,10 +1633,7 @@ export class TradingSystem {
 
     await this.store.update((state) => {
       state.strategyRuns.push(runBase);
-      if (state.strategyRuns.length > 1000) {
-        state.strategyRuns = state.strategyRuns.slice(-1000);
-      }
-      return state;
+      return this.applyStateRetention(state);
     });
 
     try {
@@ -1413,14 +1656,29 @@ export class TradingSystem {
       const signalMultiplier = signalRiskMultiplier(signal, this.config);
       const totalMultiplier = Math.max(0.01, overlay.multiplier * signalMultiplier);
       const adjustedAmount = Math.max(1, Math.round(baseAmount * totalMultiplier));
+      const orderSide = signal.action === "SELL" ? "sell" : "buy";
+      let submittedAmountKrw = adjustedAmount;
+      let sellPlan = null;
+
+      if (orderSide === "sell") {
+        const lastClose = asNumber(candleRes.data.candles.at(-1)?.close, null);
+        sellPlan = await this.resolveSellOrderAmount({
+          symbol: normalizedSymbol,
+          price: lastClose,
+          fallbackAmountKrw: adjustedAmount,
+        });
+        submittedAmountKrw = asNumber(sellPlan.amountKrw, adjustedAmount);
+      }
 
       const decision = {
         signal,
         overlay,
         amountBaseKrw: baseAmount,
         amountAdjustedKrw: adjustedAmount,
+        amountSubmittedKrw: submittedAmountKrw,
         signalMultiplier,
         totalMultiplier,
+        sellPlan,
       };
 
       const actionable = signal.action === "BUY" || (autoSellEnabled && signal.action === "SELL");
@@ -1439,12 +1697,27 @@ export class TradingSystem {
         };
       }
 
+      if (!Number.isFinite(submittedAmountKrw) || submittedAmountKrw <= 0) {
+        const result = {
+          runId,
+          ...decision,
+          order: null,
+          note: "sell skipped: no available position",
+        };
+        await this.finishRun(runId, "COMPLETED", { result });
+        return {
+          ok: true,
+          code: EXIT_CODES.OK,
+          data: result,
+        };
+      }
+
       const order = await this.placeOrder({
         symbol: normalizedSymbol,
-        side: signal.action === "SELL" ? "sell" : "buy",
+        side: orderSide,
         type: "market",
-        amount: adjustedAmount,
-        price: signal.action === "SELL" ? asNumber(candleRes.data.candles.at(-1)?.close, null) : null,
+        amount: submittedAmountKrw,
+        price: orderSide === "sell" ? asNumber(candleRes.data.candles.at(-1)?.close, null) : null,
         dryRun,
         reason: `strategy:${this.config.strategy.name}:${signal.reason}`,
       });

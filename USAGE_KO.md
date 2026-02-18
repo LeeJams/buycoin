@@ -21,23 +21,23 @@ npm install
 
 `.env.example`를 기준으로 `.env`를 설정하세요.
 
-## 실행 모드
+## 실행
 
-- 안전 제약 기반 최적화 + 적용: `npm run optimize`
-- 실행형 서비스(기본): `npm start`
-- 단발 실행 점검: `npm run start:once`
-- 엔드포인트 스모크 점검(조회 전용): `npm run smoke`
-- 엔드포인트 스모크 점검(주문+취소): `npm run smoke:write`
-- HTTP 감사로그 요약 리포트: `npm run audit:report`
+- 실행형 서비스: `npm start`
 - 페이퍼 모드 기본 초기자금: `1,000,000 KRW` (`TRADER_PAPER_INITIAL_CASH_KRW`로 변경 가능)
 - 기본 다중 종목은 `.env`의 `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,...` 로 지정 가능합니다.
+- 실행 중 유동성/품질 필터를 통과한 종목 목록이 `.trader/market-universe.json`에 저장됩니다.
 
 ## AI 설정 연동(자동매매 설정 입력점)
 
 - 기본 파일: `.trader/ai-settings.json`
-- 실행 루프는 매 윈도우 시작 시 이 파일을 읽습니다.
-- AI는 이 파일만 갱신하면 종목/주문금액/윈도우/쿨다운/드라이런/킬스위치를 제어할 수 있습니다.
+- 실행 루프는 주기적으로 AI 설정 스냅샷을 갱신합니다.
+- 기본 갱신 주기: 30~60분 (`AI_SETTINGS_REFRESH_MIN_SEC=1800`, `AI_SETTINGS_REFRESH_MAX_SEC=3600`)
+- AI는 이 파일만 갱신하면 종목/주문금액/윈도우/쿨다운/킬스위치를 제어할 수 있습니다.
 - 동시 다중 종목 실행은 `execution.symbols` 배열(또는 콤마 문자열)로 지정합니다.
+- 요청 종목은 `.trader/market-universe.json`과 교집합으로 실행됩니다(저유동/이상 종목 자동 제외).
+- 필터 강도는 `.env`의 `MARKET_UNIVERSE_*` 값으로 조정합니다.
+- 권장 운용: AI는 30~60분 주기로 시장 점검 후 변경 필요 시에만 `ai-settings.json` 갱신
 
 예시:
 
@@ -51,8 +51,7 @@ npm install
     "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
     "orderAmountKrw": 7000,
     "windowSec": 180,
-    "cooldownSec": 20,
-    "dryRun": false
+    "cooldownSec": 20
   },
   "strategy": {
     "name": "risk_managed_momentum",
@@ -67,7 +66,24 @@ npm install
     "riskManagedMinMultiplier": 0.4,
     "riskManagedMaxMultiplier": 1.8,
     "autoSellEnabled": true,
+    "sellAllOnExit": true,
+    "sellAllQtyPrecision": 8,
     "baseOrderAmountKrw": 7000
+  },
+  "decision": {
+    "mode": "filter",
+    "allowBuy": true,
+    "allowSell": true,
+    "forceAction": null,
+    "forceAmountKrw": null,
+    "forceOnce": true,
+    "symbols": {
+      "BTC_KRW": {
+        "mode": "override",
+        "forceAction": "BUY",
+        "forceAmountKrw": 7000
+      }
+    }
   },
   "overlay": {
     "multiplier": 0.8,
@@ -84,43 +100,20 @@ npm install
 ## 실행 명령
 
 ```bash
-npm run optimize
 npm start
-npm run start:once
-npm run smoke
-npm run smoke:write
-npm run audit:report
 ```
 
 CLI 모드는 제거되었습니다. 설정/제어는 `.env`와 `AI_SETTINGS_FILE`로 수행합니다.
 
-## 안전+수익 최적화 동작
-
-`npm run optimize`는 아래를 수행합니다.
-
-1. `OPTIMIZER_SYMBOLS` 종목 캔들 조회
-2. 모멘텀 파라미터 그리드 탐색
-3. 안전 제약 필터 통과 후보만 우선 선택
-   - 최대 낙폭, 최소 거래수, 최소 승률, 최소 Profit Factor, 최소 수익률
-4. 결과 저장
-   - 리포트: `OPTIMIZER_REPORT_FILE` (기본 `.trader/optimizer-report.json`)
-   - 적용 파일: `AI_SETTINGS_FILE` (`execution.symbol`, `strategy.*`)
-
-실행 중 자동 재탐색(1시간 주기):
-
-- `OPTIMIZER_REOPT_ENABLED=true`
-- `OPTIMIZER_REOPT_INTERVAL_SEC=3600`
-
-서비스 시작 시 자동 실행하려면:
-
-```bash
-OPTIMIZER_APPLY_ON_START=true npm start
-```
-
 ## 실행 규칙
 
-- BUY 시그널: `--dry-run`이 아니면 즉시 시장가 매수 실행
+- BUY 시그널: 즉시 시장가 매수 실행
 - SELL 시그널: `STRATEGY_AUTO_SELL_ENABLED=true`면 즉시 시장가 매도 실행
+- `STRATEGY_SELL_ALL_ON_EXIT=true`면 SELL은 고정 KRW 금액이 아니라 보유 가능한 수량 기준 전량 매도로 계산
+- AI 판단 정책:
+  - `decision.mode=filter`: AI가 BUY/SELL 허용 여부를 제어 (`allowBuy`, `allowSell`)
+  - `decision.mode=override`: AI가 윈도우당 강제 액션 가능 (`forceAction`, `forceAmountKrw`)
+  - 종목별 정책은 `decision.symbols.<SYMBOL>` 로 개별 오버라이드 가능
 - HOLD 시그널: 주문하지 않음
 - 오버레이는 수량이 아니라 주문금액 배율만 조정
   - `조정금액 = 기본금액 * (시그널 리스크배율) * (AI 오버레이 배율)`
@@ -138,26 +131,21 @@ OPTIMIZER_APPLY_ON_START=true npm start
 - 일 손실 한도
 - Kill Switch
 
-## Write 스모크 가드
-
-`npm run smoke:write`는 아래 조건이 모두 맞을 때만 주문/취소 검증을 수행합니다.
-
-- `SMOKE_ENABLE_WRITES=true`
-- `SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND`
-- `TRADER_PAPER_MODE=false`
-
-Write 스모크 순서:
-
-1. `orders/chance`로 최소 주문금액 조회
-2. 깊은 지정가 매수 주문
-3. 주문 취소
-4. 취소 후 주문 상태 재조회
-
 ## HTTP 감사로그
 
 - 활성화: `TRADER_HTTP_AUDIT_ENABLED`
 - 파일 경로: `TRADER_HTTP_AUDIT_FILE` (기본 `.trader/http-audit.jsonl`)
-- 집계 리포트: `npm run audit:report`
+- 자동 로테이션: `TRADER_HTTP_AUDIT_MAX_BYTES`, `TRADER_HTTP_AUDIT_PRUNE_RATIO`, `TRADER_HTTP_AUDIT_CHECK_EVERY`
+
+상태 파일 과대화 방지 보존 상한:
+
+- `TRADER_STATE_KEEP_LATEST_ONLY` (`true`면 최신 스냅샷 + 미체결 주문 중심으로만 유지)
+- `TRADER_RETENTION_CLOSED_ORDERS`
+- `TRADER_RETENTION_ORDERS`
+- `TRADER_RETENTION_ORDER_EVENTS`
+- `TRADER_RETENTION_STRATEGY_RUNS`
+- `TRADER_RETENTION_BALANCE_SNAPSHOTS`
+- `TRADER_RETENTION_FILLS`
 
 일 손실 기준값:
 

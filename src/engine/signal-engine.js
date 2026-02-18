@@ -122,13 +122,13 @@ export class BreakoutSignalEngine {
 
 export class RiskManagedMomentumSignalEngine {
   constructor(config) {
-    this.momentumLookback = Math.max(2, Number(config?.strategy?.momentumLookback || 48));
-    this.volatilityLookback = Math.max(5, Number(config?.strategy?.volatilityLookback || 96));
-    this.entryBps = Math.max(0, Number(config?.strategy?.momentumEntryBps || 20));
+    this.momentumLookback = Math.max(2, Number(config?.strategy?.momentumLookback || 24));
+    this.volatilityLookback = Math.max(5, Number(config?.strategy?.volatilityLookback || 72));
+    this.entryBps = Math.max(0, Number(config?.strategy?.momentumEntryBps || 12));
     this.exitBps = Math.max(0, Number(config?.strategy?.momentumExitBps || this.entryBps / 2));
-    this.targetVolatilityPct = asPositiveNumber(config?.strategy?.targetVolatilityPct, 0.35);
-    this.minMultiplier = asPositiveNumber(config?.strategy?.riskManagedMinMultiplier, 0.4);
-    this.maxMultiplier = asPositiveNumber(config?.strategy?.riskManagedMaxMultiplier, 1.8);
+    this.targetVolatilityPct = asPositiveNumber(config?.strategy?.targetVolatilityPct, 0.6);
+    this.minMultiplier = asPositiveNumber(config?.strategy?.riskManagedMinMultiplier, 0.6);
+    this.maxMultiplier = asPositiveNumber(config?.strategy?.riskManagedMaxMultiplier, 2.2);
   }
 
   evaluate(candles = []) {

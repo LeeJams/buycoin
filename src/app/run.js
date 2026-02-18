@@ -3,23 +3,15 @@ import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "../config/env-loader.js";
 import { loadConfig, normalizeSymbol } from "../config/defaults.js";
 import { EXIT_CODES, codeName } from "../config/exit-codes.js";
+import { CuratedMarketUniverse } from "../core/market-universe.js";
 import { TradingSystem } from "../core/trading-system.js";
 import { BithumbClient } from "../exchange/bithumb-client.js";
 import { HttpAuditLog } from "../lib/http-audit-log.js";
 import { logger } from "../lib/output.js";
 import { AiSettingsSource } from "./ai-settings.js";
-import { optimizeAndApplyBest } from "./optimize.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function toPositiveInt(value, fallback) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return Math.max(1, Math.floor(parsed));
 }
 
 function normalizeSymbolList(symbols, fallbackSymbol = "BTC_KRW") {
@@ -39,6 +31,62 @@ function normalizeSymbolList(symbols, fallbackSymbol = "BTC_KRW") {
     return unique;
   }
   return [normalizeSymbol(fallbackSymbol)];
+}
+
+function resolveDecisionForSymbol(decision, symbol) {
+  if (!decision || typeof decision !== "object") {
+    return null;
+  }
+
+  const base = {
+    mode: decision.mode,
+    allowBuy: decision.allowBuy,
+    allowSell: decision.allowSell,
+    forceAction: decision.forceAction,
+    forceAmountKrw: decision.forceAmountKrw,
+    forceOnce: decision.forceOnce,
+    note: decision.note,
+  };
+
+  const normalizedSymbol = normalizeSymbol(symbol);
+  const perSymbol = decision.symbols && typeof decision.symbols === "object"
+    ? decision.symbols[normalizedSymbol]
+    : null;
+
+  if (!perSymbol || typeof perSymbol !== "object") {
+    return base;
+  }
+
+  return {
+    ...base,
+    ...perSymbol,
+  };
+}
+
+function normalizeAiRefreshRange(aiConfig = {}) {
+  const minRaw = Number(aiConfig?.refreshMinSec);
+  const maxRaw = Number(aiConfig?.refreshMaxSec);
+  const minSec = Number.isFinite(minRaw) && minRaw > 0 ? Math.floor(minRaw) : 1_800;
+  const maxSec = Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : 3_600;
+  return {
+    minSec: Math.min(minSec, maxSec),
+    maxSec: Math.max(minSec, maxSec),
+  };
+}
+
+function nextAiRefreshDelay(range) {
+  if (!range || range.maxSec <= range.minSec) {
+    return {
+      sec: range?.minSec || 1_800,
+      ms: (range?.minSec || 1_800) * 1_000,
+    };
+  }
+
+  const sec = range.minSec + Math.floor(Math.random() * ((range.maxSec - range.minSec) + 1));
+  return {
+    sec,
+    ms: sec * 1_000,
+  };
 }
 
 function aggregateWindowResults(results = []) {
@@ -106,12 +154,21 @@ async function ensureLiveAccountPreflight(trader, config) {
   });
 }
 
-export async function runExecutionService({ system = null, config = null } = {}) {
+export async function runExecutionService({
+  system = null,
+  config = null,
+  stopAfterWindows = 0,
+  marketUniverseService = null,
+} = {}) {
   const runtimeConfig = config || loadConfig(process.env);
+  const aiRefreshRange = normalizeAiRefreshRange(runtimeConfig.ai);
   const auditLog = system
     ? null
     : new HttpAuditLog(runtimeConfig.runtime.httpAuditFile, logger, {
         enabled: runtimeConfig.runtime.httpAuditEnabled,
+        maxBytes: runtimeConfig.runtime.httpAuditMaxBytes,
+        pruneRatio: runtimeConfig.runtime.httpAuditPruneRatio,
+        checkEvery: runtimeConfig.runtime.httpAuditCheckEvery,
       });
 
   if (auditLog) {
@@ -125,29 +182,12 @@ export async function runExecutionService({ system = null, config = null } = {})
     }),
   });
   const aiSettings = new AiSettingsSource(runtimeConfig, logger);
+  const marketUniverse = marketUniverseService || new CuratedMarketUniverse(runtimeConfig, logger, trader.marketData);
 
   try {
     await trader.init();
     await aiSettings.init();
-    if (runtimeConfig.optimizer?.enabled && runtimeConfig.optimizer?.applyOnStart) {
-      const optimization = await optimizeAndApplyBest({
-        config: runtimeConfig,
-        logger: logger,
-        apply: runtimeConfig.optimizer.applyToAiSettings !== false,
-      });
-      if (optimization.ok) {
-        logger.info("startup optimizer completed", {
-          applied: optimization.data.applied,
-          symbol: optimization.data.best?.symbol || null,
-          returnPct: optimization.data.best?.metrics?.totalReturnPct ?? null,
-          maxDrawdownPct: optimization.data.best?.metrics?.maxDrawdownPct ?? null,
-        });
-      } else {
-        logger.warn("startup optimizer skipped", {
-          reason: optimization.error?.message || "unknown",
-        });
-      }
-    }
+    await marketUniverse.init();
     ensureLiveCredentials(runtimeConfig);
     await ensureLiveAccountPreflight(trader, runtimeConfig);
 
@@ -183,64 +223,76 @@ export async function runExecutionService({ system = null, config = null } = {})
       amountKrw: runtimeConfig.execution.orderAmountKrw,
       windowSec: runtimeConfig.execution.windowSec,
       cooldownSec: runtimeConfig.execution.cooldownSec,
-      dryRun: runtimeConfig.execution.dryRun,
-      maxWindows: runtimeConfig.execution.maxWindows,
       aiSettingsEnabled: aiSettings.enabled,
       aiSettingsFile: aiSettings.settingsFile,
+      aiSettingsRefreshMinSec: aiRefreshRange.minSec,
+      aiSettingsRefreshMaxSec: aiRefreshRange.maxSec,
+      marketUniverseEnabled: marketUniverse.enabled,
+      marketUniverseQuote: runtimeConfig.marketUniverse?.quote || null,
+      marketUniverseFile: runtimeConfig.marketUniverse?.snapshotFile || null,
       httpAuditEnabled: runtimeConfig.runtime.httpAuditEnabled,
       httpAuditFile: runtimeConfig.runtime.httpAuditFile,
-      optimizerReoptEnabled: runtimeConfig.optimizer?.enabled && runtimeConfig.optimizer?.reoptEnabled,
-      optimizerReoptIntervalSec: runtimeConfig.optimizer?.reoptIntervalSec ?? null,
     });
 
-    const optimizerRuntimeEnabled = runtimeConfig.optimizer?.enabled === true;
-    const periodicReoptEnabled = optimizerRuntimeEnabled && runtimeConfig.optimizer?.reoptEnabled === true;
-    const reoptIntervalSec = toPositiveInt(runtimeConfig.optimizer?.reoptIntervalSec, 3600);
-    const reoptIntervalMs = reoptIntervalSec * 1000;
-    let nextReoptAtMs = periodicReoptEnabled ? Date.now() + reoptIntervalMs : null;
-
     let windows = 0;
+    let aiRuntime = await aiSettings.read();
+    let aiRefresh = nextAiRefreshDelay(aiRefreshRange);
+    let nextAiRefreshAt = Date.now() + aiRefresh.ms;
+
+    if (aiSettings.enabled) {
+      logger.info("ai settings snapshot loaded", {
+        source: aiRuntime.source,
+        nextRefreshSec: aiRefresh.sec,
+      });
+    }
+
+    const universeStartup = await marketUniverse.maybeRefresh({ force: true, reason: "startup" });
+    if (universeStartup.ok && universeStartup.data) {
+      logger.info("market universe refreshed", {
+        reason: "startup",
+        selectedSymbols: universeStartup.data.symbols.length,
+        minAccTradeValue24hKrw: universeStartup.data.criteria?.minAccTradeValue24hKrw ?? null,
+        nextRefreshSec: universeStartup.data.nextRefreshSec ?? null,
+      });
+    } else if (!universeStartup.ok) {
+      logger.warn("failed to refresh market universe", {
+        reason: "startup",
+        error: universeStartup.error?.message || "unknown",
+      });
+    }
+
     let lastOverlayHash = null;
     let lastKillSwitch = null;
     let lastStrategyHash = null;
+    let lastDecisionHash = null;
     while (!stopRequested) {
       windows += 1;
 
-      if (periodicReoptEnabled && nextReoptAtMs !== null && Date.now() >= nextReoptAtMs) {
-        try {
-          const optimization = await optimizeAndApplyBest({
-            config: runtimeConfig,
-            logger: logger,
-            apply: runtimeConfig.optimizer.applyToAiSettings !== false,
-          });
-          if (optimization.ok) {
-            logger.info("periodic optimizer completed", {
-              window: windows,
-              intervalSec: reoptIntervalSec,
-              applied: optimization.data.applied,
-              symbol: optimization.data.best?.symbol || null,
-              returnPct: optimization.data.best?.metrics?.totalReturnPct ?? null,
-              maxDrawdownPct: optimization.data.best?.metrics?.maxDrawdownPct ?? null,
-            });
-          } else {
-            logger.warn("periodic optimizer skipped", {
-              window: windows,
-              intervalSec: reoptIntervalSec,
-              reason: optimization.error?.message || "unknown",
-            });
-          }
-        } catch (error) {
-          logger.error("periodic optimizer failed", {
-            window: windows,
-            intervalSec: reoptIntervalSec,
-            reason: error.message,
-          });
-        } finally {
-          nextReoptAtMs = Date.now() + reoptIntervalMs;
-        }
+      if (aiSettings.enabled && Date.now() >= nextAiRefreshAt) {
+        aiRuntime = await aiSettings.read();
+        aiRefresh = nextAiRefreshDelay(aiRefreshRange);
+        nextAiRefreshAt = Date.now() + aiRefresh.ms;
+        logger.info("ai settings snapshot refreshed", {
+          source: aiRuntime.source,
+          nextRefreshSec: aiRefresh.sec,
+        });
       }
 
-      const aiRuntime = await aiSettings.read();
+      const universeUpdate = await marketUniverse.maybeRefresh({ reason: "periodic" });
+      if (universeUpdate.ok && universeUpdate.data && universeUpdate.skipped !== "not_due") {
+        logger.info("market universe refreshed", {
+          reason: "periodic",
+          selectedSymbols: universeUpdate.data.symbols.length,
+          minAccTradeValue24hKrw: universeUpdate.data.criteria?.minAccTradeValue24hKrw ?? null,
+          nextRefreshSec: universeUpdate.data.nextRefreshSec ?? null,
+        });
+      } else if (!universeUpdate.ok) {
+        logger.warn("failed to refresh market universe", {
+          reason: "periodic",
+          error: universeUpdate.error?.message || "unknown",
+        });
+      }
+
       const effective = aiRuntime.execution;
 
       if (aiSettings.enabled && aiRuntime.strategy) {
@@ -284,6 +336,21 @@ export async function runExecutionService({ system = null, config = null } = {})
         }
       }
 
+      if (aiSettings.enabled && aiRuntime.decision) {
+        const decisionHash = JSON.stringify(aiRuntime.decision);
+        if (decisionHash !== lastDecisionHash) {
+          logger.info("decision policy updated from ai settings", {
+            source: aiRuntime.source,
+            mode: aiRuntime.decision.mode,
+            allowBuy: aiRuntime.decision.allowBuy,
+            allowSell: aiRuntime.decision.allowSell,
+            forceAction: aiRuntime.decision.forceAction,
+            symbolOverrides: Object.keys(aiRuntime.decision.symbols || {}).length,
+          });
+          lastDecisionHash = decisionHash;
+        }
+      }
+
       if (typeof aiRuntime.controls.killSwitch === "boolean" && aiRuntime.controls.killSwitch !== lastKillSwitch) {
         const killSwitchResult = await trader.setKillSwitch(
           aiRuntime.controls.killSwitch,
@@ -303,26 +370,60 @@ export async function runExecutionService({ system = null, config = null } = {})
           source: aiRuntime.source,
         });
 
-        if (runtimeConfig.execution.maxWindows > 0 && windows >= runtimeConfig.execution.maxWindows) {
-          stoppedBy = "max_windows";
-          break;
+        if (!stopRequested) {
+          await sleep(runtimeConfig.execution.restartDelayMs);
         }
 
+        if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
+          stoppedBy = "window_limit";
+          break;
+        }
+        continue;
+      }
+
+      const requestedSymbols = normalizeSymbolList(effective.symbols, effective.symbol);
+      const filteredSymbols = marketUniverse.filterSymbols(requestedSymbols);
+      const targetSymbols = filteredSymbols.symbols;
+
+      if (filteredSymbols.filteredOut.length > 0) {
+        logger.warn("execution symbols filtered by market universe", {
+          window: windows,
+          source: aiRuntime.source,
+          requestedSymbols,
+          acceptedSymbols: targetSymbols,
+          rejectedSymbols: filteredSymbols.filteredOut,
+          allowedCount: filteredSymbols.allowedCount,
+        });
+      }
+
+      if (targetSymbols.length === 0) {
+        logger.warn("execution window skipped: no symbols passed market universe filter", {
+          window: windows,
+          source: aiRuntime.source,
+          requestedSymbols,
+          allowedCount: filteredSymbols.allowedCount,
+        });
+
+        if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
+          stoppedBy = "window_limit";
+          break;
+        }
         if (!stopRequested) {
           await sleep(runtimeConfig.execution.restartDelayMs);
         }
         continue;
       }
 
-      const targetSymbols = normalizeSymbolList(effective.symbols, effective.symbol);
       const perSymbolResults = await Promise.all(
         targetSymbols.map(async (targetSymbol) => {
+          const executionPolicy = resolveDecisionForSymbol(aiRuntime.decision, targetSymbol);
           const result = await trader.runStrategyRealtime({
             symbol: targetSymbol,
             amount: effective.orderAmountKrw,
             durationSec: effective.windowSec,
             cooldownSec: effective.cooldownSec,
-            dryRun: effective.dryRun,
+            dryRun: false,
+            executionPolicy,
           });
           return {
             symbol: targetSymbol,
@@ -339,7 +440,6 @@ export async function runExecutionService({ system = null, config = null } = {})
           symbols: targetSymbols,
           symbolCount: targetSymbols.length,
           amountKrw: effective.orderAmountKrw,
-          dryRun: effective.dryRun,
           tickCount: aggregated.totals.tickCount,
           buySignals: aggregated.totals.buySignals,
           sellSignals: aggregated.totals.sellSignals,
@@ -363,7 +463,6 @@ export async function runExecutionService({ system = null, config = null } = {})
           symbols: targetSymbols,
           symbolCount: targetSymbols.length,
           amountKrw: effective.orderAmountKrw,
-          dryRun: effective.dryRun,
           tickCount: aggregated.totals.tickCount,
           buySignals: aggregated.totals.buySignals,
           sellSignals: aggregated.totals.sellSignals,
@@ -378,8 +477,8 @@ export async function runExecutionService({ system = null, config = null } = {})
         });
       }
 
-      if (runtimeConfig.execution.maxWindows > 0 && windows >= runtimeConfig.execution.maxWindows) {
-        stoppedBy = "max_windows";
+      if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
+        stoppedBy = "window_limit";
         break;
       }
 

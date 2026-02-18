@@ -21,23 +21,22 @@ npm install
 
 Configure `.env` from `.env.example`.
 
-## Run Modes
+## Runtime
 
-- Safe-constrained optimization + apply: `npm run optimize`
-- Execution service (default): `npm start`
-- One-shot execution check: `npm run start:once`
-- Endpoint smoke check (read-only): `npm run smoke`
-- Endpoint smoke check (write place+cancel): `npm run smoke:write`
-- HTTP audit summary report: `npm run audit:report`
+- Execution service: `npm start`
 - Paper mode default starting cash: `1,000,000 KRW` (override with `TRADER_PAPER_INITIAL_CASH_KRW`)
 - You can set default multi-symbol execution via `.env` with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,...`.
+- Runtime writes curated tradable symbols to `.trader/market-universe.json`.
 
 ## AI Settings Bridge (runtime input for automation)
 
 - Default file: `.trader/ai-settings.json`
-- The daemon reads this file at each execution window.
-- AI can control symbol/order notional/window/cooldown/dry-run/kill-switch by updating this file.
+- The daemon refreshes this file on a periodic snapshot cycle.
+- Default refresh cadence is 30-60 minutes (`AI_SETTINGS_REFRESH_MIN_SEC=1800`, `AI_SETTINGS_REFRESH_MAX_SEC=3600`).
+- AI can control symbol/order notional/window/cooldown/kill-switch by updating this file.
 - For concurrent multi-symbol execution, set `execution.symbols` (array or comma-separated string).
+- Requested symbols are intersected with `.trader/market-universe.json` (liquidity/quality filter).
+- Tune universe strictness via `MARKET_UNIVERSE_*` in `.env`.
 
 Example:
 
@@ -51,8 +50,7 @@ Example:
     "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
     "orderAmountKrw": 7000,
     "windowSec": 180,
-    "cooldownSec": 20,
-    "dryRun": false
+    "cooldownSec": 20
   },
   "strategy": {
     "name": "risk_managed_momentum",
@@ -67,7 +65,24 @@ Example:
     "riskManagedMinMultiplier": 0.4,
     "riskManagedMaxMultiplier": 1.8,
     "autoSellEnabled": true,
+    "sellAllOnExit": true,
+    "sellAllQtyPrecision": 8,
     "baseOrderAmountKrw": 7000
+  },
+  "decision": {
+    "mode": "filter",
+    "allowBuy": true,
+    "allowSell": true,
+    "forceAction": null,
+    "forceAmountKrw": null,
+    "forceOnce": true,
+    "symbols": {
+      "BTC_KRW": {
+        "mode": "override",
+        "forceAction": "BUY",
+        "forceAmountKrw": 7000
+      }
+    }
   },
   "overlay": {
     "multiplier": 0.8,
@@ -84,43 +99,20 @@ Example:
 ## Run Commands
 
 ```bash
-npm run optimize
 npm start
-npm run start:once
-npm run smoke
-npm run smoke:write
-npm run audit:report
 ```
 
 CLI mode has been removed. Control is file-driven (`.env` + `AI_SETTINGS_FILE`).
 
-## Safe + Return Optimization
-
-`npm run optimize` does:
-
-1. fetch candles for `OPTIMIZER_SYMBOLS`
-2. grid-search momentum parameters
-3. prioritize candidates that pass safety constraints
-   - max drawdown, min trades, min win rate, min profit factor, min return
-4. persist outputs
-   - report: `OPTIMIZER_REPORT_FILE` (default `.trader/optimizer-report.json`)
-   - applied runtime settings: `AI_SETTINGS_FILE` (`execution.symbol`, `strategy.*`)
-
-Automatic re-optimization during daemon runtime (hourly):
-
-- `OPTIMIZER_REOPT_ENABLED=true`
-- `OPTIMIZER_REOPT_INTERVAL_SEC=3600`
-
-To auto-run optimizer before daemon loop:
-
-```bash
-OPTIMIZER_APPLY_ON_START=true npm start
-```
-
 ## Execution Rules
 
-- BUY signal: executes market buy immediately (unless `--dry-run`).
+- BUY signal: executes market buy immediately.
 - SELL signal: executes market sell immediately when `STRATEGY_AUTO_SELL_ENABLED=true`.
+- If `STRATEGY_SELL_ALL_ON_EXIT=true`, SELL uses available asset quantity (not fixed KRW amount).
+- AI decision policy:
+  - `decision.mode=filter`: AI can block BUY/SELL (`allowBuy`, `allowSell`)
+  - `decision.mode=override`: AI can force one action per window (`forceAction`, `forceAmountKrw`)
+  - symbol-level override is supported via `decision.symbols.<SYMBOL>`
 - HOLD signal: no order.
 - Final size uses `baseAmount * signalRiskMultiplier * overlayMultiplier`.
 - If overlay times out or is stale, fallback multiplier is used.
@@ -137,26 +129,21 @@ OPTIMIZER_APPLY_ON_START=true npm start
 - Max daily loss
 - Kill switch
 
-## Smoke Write Guard
-
-`npm run smoke:write` requires explicit confirmation and runs only in live mode:
-
-- `SMOKE_ENABLE_WRITES=true`
-- `SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND`
-- `TRADER_PAPER_MODE=false`
-
-The write smoke flow is:
-
-1. fetch chance and min notional
-2. place deep limit buy
-3. cancel order
-4. read back order state
-
 ## HTTP Audit Trail
 
 - audit toggle: `TRADER_HTTP_AUDIT_ENABLED`
 - audit file: `TRADER_HTTP_AUDIT_FILE` (default `.trader/http-audit.jsonl`)
-- report command: `npm run audit:report`
+- auto rotation: `TRADER_HTTP_AUDIT_MAX_BYTES`, `TRADER_HTTP_AUDIT_PRUNE_RATIO`, `TRADER_HTTP_AUDIT_CHECK_EVERY`
+
+State retention caps (to avoid oversized `.trader/state.json`):
+
+- `TRADER_STATE_KEEP_LATEST_ONLY` (when `true`, keep latest snapshots + open orders)
+- `TRADER_RETENTION_CLOSED_ORDERS`
+- `TRADER_RETENTION_ORDERS`
+- `TRADER_RETENTION_ORDER_EVENTS`
+- `TRADER_RETENTION_STRATEGY_RUNS`
+- `TRADER_RETENTION_BALANCE_SNAPSHOTS`
+- `TRADER_RETENTION_FILLS`
 
 Daily loss baseline:
 

@@ -17,6 +17,7 @@ const ALLOWED_INTERVALS = new Set([
   "week",
   "month",
 ]);
+const ALLOWED_DECISION_MODES = new Set(["rule", "filter", "override"]);
 
 function toBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") {
@@ -131,6 +132,76 @@ function normalizeOverlay(overlayRaw) {
   };
 }
 
+function normalizeDecisionMode(value, fallback = "filter") {
+  const token = String(value || fallback || "filter")
+    .trim()
+    .toLowerCase();
+  return ALLOWED_DECISION_MODES.has(token) ? token : fallback;
+}
+
+function normalizeDecisionAction(value) {
+  const token = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (["buy", "bid"].includes(token)) {
+    return "BUY";
+  }
+  if (["sell", "ask"].includes(token)) {
+    return "SELL";
+  }
+  return null;
+}
+
+function normalizeDecisionBase(raw = {}, fallback = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const base = fallback && typeof fallback === "object" ? fallback : {};
+  return {
+    mode: normalizeDecisionMode(source.mode, normalizeDecisionMode(base.mode, "filter")),
+    allowBuy: toBoolean(source.allowBuy, toBoolean(base.allowBuy, true)),
+    allowSell: toBoolean(source.allowSell, toBoolean(base.allowSell, true)),
+    forceAction: normalizeDecisionAction(
+      source.forceAction ?? source.action ?? base.forceAction ?? null,
+    ),
+    forceAmountKrw: toNullablePositiveNumber(
+      source.forceAmountKrw ?? source.amountKrw ?? base.forceAmountKrw ?? null,
+    ),
+    forceOnce: toBoolean(source.forceOnce, toBoolean(base.forceOnce, true)),
+    note: source.note ? String(source.note) : (base.note ? String(base.note) : null),
+  };
+}
+
+function normalizeDecision(raw = {}, fallback = {}) {
+  const defaults = normalizeDecisionBase(fallback, {
+    mode: "filter",
+    allowBuy: true,
+    allowSell: true,
+    forceAction: null,
+    forceAmountKrw: null,
+    forceOnce: true,
+    note: null,
+  });
+
+  const top = normalizeDecisionBase(raw, defaults);
+  const decision = {
+    ...top,
+    symbols: {},
+  };
+
+  const symbolsRaw = raw?.symbols;
+  if (!symbolsRaw || typeof symbolsRaw !== "object" || Array.isArray(symbolsRaw)) {
+    return decision;
+  }
+
+  for (const [symbolRaw, row] of Object.entries(symbolsRaw)) {
+    const symbol = normalizeSymbol(symbolRaw);
+    if (!symbol) {
+      continue;
+    }
+    decision.symbols[symbol] = normalizeDecisionBase(row, top);
+  }
+  return decision;
+}
+
 export class AiSettingsSource {
   constructor(config, logger) {
     this.config = config;
@@ -157,7 +228,6 @@ export class AiSettingsSource {
       orderAmountKrw: this.config.execution.orderAmountKrw,
       windowSec: this.config.execution.windowSec,
       cooldownSec: this.config.execution.cooldownSec,
-      dryRun: Boolean(this.config.execution.dryRun),
     };
   }
 
@@ -170,15 +240,30 @@ export class AiSettingsSource {
       candleCount: toPositiveInt(base.candleCount, 120),
       breakoutLookback: toPositiveInt(base.breakoutLookback, 20),
       breakoutBufferBps: toPositiveNumber(base.breakoutBufferBps, 5),
-      momentumLookback: toPositiveInt(base.momentumLookback, 48),
-      volatilityLookback: toPositiveInt(base.volatilityLookback, 96),
-      momentumEntryBps: toPositiveNumber(base.momentumEntryBps, 20),
-      momentumExitBps: toPositiveNumber(base.momentumExitBps, 10),
-      targetVolatilityPct: toPositiveNumber(base.targetVolatilityPct, 0.35),
-      riskManagedMinMultiplier: toPositiveNumber(base.riskManagedMinMultiplier, 0.4),
-      riskManagedMaxMultiplier: toPositiveNumber(base.riskManagedMaxMultiplier, 1.8),
+      momentumLookback: toPositiveInt(base.momentumLookback, 24),
+      volatilityLookback: toPositiveInt(base.volatilityLookback, 72),
+      momentumEntryBps: toPositiveNumber(base.momentumEntryBps, 12),
+      momentumExitBps: toPositiveNumber(base.momentumExitBps, 8),
+      targetVolatilityPct: toPositiveNumber(base.targetVolatilityPct, 0.6),
+      riskManagedMinMultiplier: toPositiveNumber(base.riskManagedMinMultiplier, 0.6),
+      riskManagedMaxMultiplier: toPositiveNumber(base.riskManagedMaxMultiplier, 2.2),
       autoSellEnabled: toBoolean(base.autoSellEnabled, true),
+      sellAllOnExit: toBoolean(base.sellAllOnExit, true),
+      sellAllQtyPrecision: toPositiveInt(base.sellAllQtyPrecision, 8),
       baseOrderAmountKrw: toPositiveNumber(base.baseOrderAmountKrw, 5_000),
+    };
+  }
+
+  defaultDecision() {
+    return {
+      mode: "filter",
+      allowBuy: true,
+      allowSell: true,
+      forceAction: null,
+      forceAmountKrw: null,
+      forceOnce: true,
+      note: null,
+      symbols: {},
     };
   }
 
@@ -188,6 +273,7 @@ export class AiSettingsSource {
       loadedAt: nowIso(),
       execution: this.defaultExecution(),
       strategy: this.defaultStrategy(),
+      decision: this.defaultDecision(),
       overlay: null,
       controls: {
         killSwitch: null,
@@ -204,6 +290,7 @@ export class AiSettingsSource {
       updatedAt: nowIso(),
       execution: this.defaultExecution(),
       strategy: this.defaultStrategy(),
+      decision: this.defaultDecision(),
       overlay: {
         multiplier: defaultMultiplier,
         score: null,
@@ -242,6 +329,8 @@ export class AiSettingsSource {
     const defaults = this.defaultExecution();
     const strategyRaw = raw.strategy || {};
     const strategyDefaults = this.defaultStrategy();
+    const decisionRaw = raw.decision || {};
+    const decisionDefaults = this.defaultDecision();
 
     const execution = {
       enabled: toBoolean(executionRaw.enabled, defaults.enabled),
@@ -250,7 +339,6 @@ export class AiSettingsSource {
       orderAmountKrw: toPositiveNumber(executionRaw.orderAmountKrw, defaults.orderAmountKrw),
       windowSec: toPositiveInt(executionRaw.windowSec, defaults.windowSec),
       cooldownSec: toNonNegativeInt(executionRaw.cooldownSec, defaults.cooldownSec),
-      dryRun: toBoolean(executionRaw.dryRun, defaults.dryRun),
     };
     const symbols = toSymbolArray(executionRaw.symbols, defaults.symbols || [execution.symbol]);
     if (execution.symbol && !symbols.includes(execution.symbol)) {
@@ -280,6 +368,8 @@ export class AiSettingsSource {
         strategyDefaults.riskManagedMaxMultiplier,
       ),
       autoSellEnabled: toBoolean(strategyRaw.autoSellEnabled, strategyDefaults.autoSellEnabled),
+      sellAllOnExit: toBoolean(strategyRaw.sellAllOnExit, strategyDefaults.sellAllOnExit),
+      sellAllQtyPrecision: toPositiveInt(strategyRaw.sellAllQtyPrecision, strategyDefaults.sellAllQtyPrecision),
       baseOrderAmountKrw: toPositiveNumber(strategyRaw.baseOrderAmountKrw, strategyDefaults.baseOrderAmountKrw),
     };
 
@@ -288,11 +378,13 @@ export class AiSettingsSource {
     };
 
     const overlay = this.applyOverlay ? normalizeOverlay(raw.overlay) : null;
+    const decision = normalizeDecision(decisionRaw, decisionDefaults);
     return {
       source: "ai_settings_file",
       loadedAt: nowIso(),
       execution,
       strategy,
+      decision,
       overlay,
       controls,
     };

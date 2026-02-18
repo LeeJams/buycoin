@@ -61,6 +61,8 @@ function baseConfig() {
       settingsFile: null,
       applyOverlay: true,
       applyKillSwitch: true,
+      refreshMinSec: 1800,
+      refreshMaxSec: 3600,
     },
     execution: {
       enabled: true,
@@ -69,25 +71,24 @@ function baseConfig() {
       orderAmountKrw: 5000,
       windowSec: 1,
       cooldownSec: 1,
-      dryRun: true,
       restartDelayMs: 1,
-      maxWindows: 2,
     },
   };
 }
 
-test("execution service runs realtime windows by maxWindows", async () => {
+test("execution service runs realtime windows by stopAfterWindows", async () => {
   const config = baseConfig();
   const system = new SystemMock();
 
   const result = await runExecutionService({
     system,
     config,
+    stopAfterWindows: 2,
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.windows, 2);
-  assert.equal(result.stoppedBy, "max_windows");
+  assert.equal(result.stoppedBy, "window_limit");
   assert.equal(system.calls.init, 1);
   assert.equal(system.calls.realtime, 2);
   assert.equal(system.calls.args[0].symbol, "BTC_KRW");
@@ -123,7 +124,6 @@ test("execution service applies ai execution settings per window", async () => {
       orderAmountKrw: 7000,
       windowSec: 2,
       cooldownSec: 0,
-      dryRun: false,
     },
     strategy: {
       name: "risk_managed_momentum",
@@ -148,10 +148,9 @@ test("execution service applies ai execution settings per window", async () => {
   const config = baseConfig();
   config.ai.enabled = true;
   config.ai.settingsFile = settingsFile;
-  config.execution.maxWindows = 1;
 
   const system = new SystemMock();
-  const result = await runExecutionService({ system, config });
+  const result = await runExecutionService({ system, config, stopAfterWindows: 1 });
 
   assert.equal(result.ok, true);
   assert.equal(result.windows, 1);
@@ -177,7 +176,18 @@ test("execution service runs multiple symbols in one window when ai settings pro
       orderAmountKrw: 7000,
       windowSec: 2,
       cooldownSec: 0,
-      dryRun: true,
+    },
+    decision: {
+      mode: "override",
+      forceAction: "buy",
+      forceAmountKrw: 6500,
+      symbols: {
+        "ETH_KRW": {
+          mode: "filter",
+          allowBuy: false,
+          allowSell: true,
+        },
+      },
     },
   };
   await fs.writeFile(settingsFile, JSON.stringify(payload, null, 2), "utf8");
@@ -185,14 +195,130 @@ test("execution service runs multiple symbols in one window when ai settings pro
   const config = baseConfig();
   config.ai.enabled = true;
   config.ai.settingsFile = settingsFile;
-  config.execution.maxWindows = 1;
 
   const system = new SystemMock();
-  const result = await runExecutionService({ system, config });
+  const result = await runExecutionService({ system, config, stopAfterWindows: 1 });
 
   assert.equal(result.ok, true);
   assert.equal(result.windows, 1);
   assert.equal(system.calls.realtime, 3);
   const symbols = system.calls.args.map((row) => row.symbol).sort();
   assert.deepEqual(symbols, ["BTC_KRW", "ETH_KRW", "USDT_KRW"]);
+  const bySymbol = Object.fromEntries(system.calls.args.map((row) => [row.symbol, row.executionPolicy]));
+  assert.equal(bySymbol.BTC_KRW.mode, "override");
+  assert.equal(bySymbol.BTC_KRW.forceAction, "BUY");
+  assert.equal(bySymbol.BTC_KRW.forceAmountKrw, 6500);
+  assert.equal(bySymbol.ETH_KRW.mode, "filter");
+  assert.equal(bySymbol.ETH_KRW.allowBuy, false);
+  assert.equal(bySymbol.ETH_KRW.allowSell, true);
+});
+
+test("execution service keeps ai snapshot until refresh window", async () => {
+  const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "execution-ai-refresh-"));
+  const settingsFile = path.join(baseDir, "ai-settings.json");
+  const firstPayload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    execution: {
+      enabled: true,
+      symbol: "USDT_KRW",
+      symbols: ["USDT_KRW"],
+      orderAmountKrw: 7000,
+      windowSec: 1,
+      cooldownSec: 0,
+    },
+  };
+  const secondPayload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    execution: {
+      enabled: true,
+      symbol: "ETH_KRW",
+      symbols: ["ETH_KRW"],
+      orderAmountKrw: 9000,
+      windowSec: 1,
+      cooldownSec: 0,
+    },
+  };
+  await fs.writeFile(settingsFile, JSON.stringify(firstPayload, null, 2), "utf8");
+
+  class MutatingSystemMock extends SystemMock {
+    async runStrategyRealtime(args) {
+      this.calls.realtime += 1;
+      this.calls.args.push(args);
+      if (this.calls.realtime === 1) {
+        await fs.writeFile(settingsFile, JSON.stringify(secondPayload, null, 2), "utf8");
+      }
+      return this.result;
+    }
+  }
+
+  const config = baseConfig();
+  config.ai.enabled = true;
+  config.ai.settingsFile = settingsFile;
+  config.ai.refreshMinSec = 3600;
+  config.ai.refreshMaxSec = 3600;
+
+  const system = new MutatingSystemMock();
+  const result = await runExecutionService({ system, config, stopAfterWindows: 2 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.windows, 2);
+  assert.equal(system.calls.realtime, 2);
+  assert.equal(system.calls.args[0].symbol, "USDT_KRW");
+  assert.equal(system.calls.args[1].symbol, "USDT_KRW");
+  assert.equal(system.calls.args[0].amount, 7000);
+  assert.equal(system.calls.args[1].amount, 7000);
+});
+
+test("execution service applies market universe filter to requested symbols", async () => {
+  const config = baseConfig();
+  config.execution.symbols = ["BTC_KRW", "ETH_KRW", "USDT_KRW"];
+
+  const system = new SystemMock();
+  const universe = {
+    enabled: true,
+    async init() {},
+    async maybeRefresh() {
+      return {
+        ok: true,
+        data: {
+          symbols: ["BTC_KRW", "USDT_KRW"],
+          criteria: { minAccTradeValue24hKrw: 1 },
+          nextRefreshSec: 1800,
+        },
+      };
+    },
+    filterSymbols(symbols = []) {
+      const allowed = new Set(["BTC_KRW", "USDT_KRW"]);
+      const accepted = [];
+      const rejected = [];
+      for (const symbol of symbols) {
+        if (allowed.has(symbol)) {
+          accepted.push(symbol);
+        } else {
+          rejected.push(symbol);
+        }
+      }
+      return {
+        symbols: accepted,
+        filteredOut: rejected,
+        allowedCount: allowed.size,
+        source: "mock",
+      };
+    },
+  };
+
+  const result = await runExecutionService({
+    system,
+    config,
+    stopAfterWindows: 1,
+    marketUniverseService: universe,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.windows, 1);
+  assert.equal(system.calls.realtime, 2);
+  const symbols = system.calls.args.map((row) => row.symbol).sort();
+  assert.deepEqual(symbols, ["BTC_KRW", "USDT_KRW"]);
 });

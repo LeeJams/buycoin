@@ -111,6 +111,15 @@ export function fromBithumbMarket(market) {
 export function loadConfig(env = process.env) {
   const defaultSymbol = normalizeSymbol(env.STRATEGY_SYMBOL || env.TRADER_DEFAULT_SYMBOL || "BTC_KRW");
   const optimizerDefaultSymbols = Array.from(new Set([defaultSymbol, "ETH_KRW", "USDT_KRW"]));
+  const universeDefaultIncludes = Array.from(new Set([
+    "BTC_KRW",
+    "ETH_KRW",
+    "XRP_KRW",
+    "SOL_KRW",
+    "DOGE_KRW",
+    "USDT_KRW",
+    defaultSymbol,
+  ]));
 
   return {
     runtime: {
@@ -118,10 +127,22 @@ export function loadConfig(env = process.env) {
       overlayFile: env.TRADER_OVERLAY_FILE || path.join(process.cwd(), ".trader", "overlay.json"),
       httpAuditEnabled: toBoolean(env.TRADER_HTTP_AUDIT_ENABLED, true),
       httpAuditFile: env.TRADER_HTTP_AUDIT_FILE || path.join(process.cwd(), ".trader", "http-audit.jsonl"),
+      httpAuditMaxBytes: toNonNegativeInt(env.TRADER_HTTP_AUDIT_MAX_BYTES, 10 * 1024 * 1024),
+      httpAuditPruneRatio: toNumber(env.TRADER_HTTP_AUDIT_PRUNE_RATIO, 0.7),
+      httpAuditCheckEvery: toPositiveInt(env.TRADER_HTTP_AUDIT_CHECK_EVERY, 200),
       timezone: env.TZ || "Asia/Seoul",
       paperMode: toBoolean(env.TRADER_PAPER_MODE, true),
       paperInitialCashKrw: toPositiveNumber(env.TRADER_PAPER_INITIAL_CASH_KRW, 1_000_000),
       stateLockStaleMs: toPositiveInt(env.TRADER_STATE_LOCK_STALE_MS, 30_000),
+      retention: {
+        keepLatestOnly: toBoolean(env.TRADER_STATE_KEEP_LATEST_ONLY, false),
+        closedOrders: toNonNegativeInt(env.TRADER_RETENTION_CLOSED_ORDERS, 20),
+        orders: toPositiveInt(env.TRADER_RETENTION_ORDERS, 400),
+        orderEvents: toPositiveInt(env.TRADER_RETENTION_ORDER_EVENTS, 1000),
+        strategyRuns: toPositiveInt(env.TRADER_RETENTION_STRATEGY_RUNS, 400),
+        balancesSnapshot: toPositiveInt(env.TRADER_RETENTION_BALANCE_SNAPSHOTS, 120),
+        fills: toPositiveInt(env.TRADER_RETENTION_FILLS, 1000),
+      },
     },
     exchange: {
       baseUrl: env.BITHUMB_BASE_URL || "https://api.bithumb.com",
@@ -143,14 +164,16 @@ export function loadConfig(env = process.env) {
       candleCount: toPositiveInt(env.STRATEGY_CANDLE_COUNT, 120),
       breakoutLookback: toPositiveInt(env.STRATEGY_BREAKOUT_LOOKBACK, 20),
       breakoutBufferBps: toPositiveNumber(env.STRATEGY_BREAKOUT_BUFFER_BPS, 5),
-      momentumLookback: toPositiveInt(env.STRATEGY_MOMENTUM_LOOKBACK, 48),
-      volatilityLookback: toPositiveInt(env.STRATEGY_VOLATILITY_LOOKBACK, 96),
-      momentumEntryBps: toPositiveNumber(env.STRATEGY_MOMENTUM_ENTRY_BPS, 20),
-      momentumExitBps: toPositiveNumber(env.STRATEGY_MOMENTUM_EXIT_BPS, 10),
-      targetVolatilityPct: toPositiveNumber(env.STRATEGY_TARGET_VOLATILITY_PCT, 0.35),
-      riskManagedMinMultiplier: toPositiveNumber(env.STRATEGY_RM_MIN_MULTIPLIER, 0.4),
-      riskManagedMaxMultiplier: toPositiveNumber(env.STRATEGY_RM_MAX_MULTIPLIER, 1.8),
+      momentumLookback: toPositiveInt(env.STRATEGY_MOMENTUM_LOOKBACK, 24),
+      volatilityLookback: toPositiveInt(env.STRATEGY_VOLATILITY_LOOKBACK, 72),
+      momentumEntryBps: toPositiveNumber(env.STRATEGY_MOMENTUM_ENTRY_BPS, 12),
+      momentumExitBps: toPositiveNumber(env.STRATEGY_MOMENTUM_EXIT_BPS, 8),
+      targetVolatilityPct: toPositiveNumber(env.STRATEGY_TARGET_VOLATILITY_PCT, 0.6),
+      riskManagedMinMultiplier: toPositiveNumber(env.STRATEGY_RM_MIN_MULTIPLIER, 0.6),
+      riskManagedMaxMultiplier: toPositiveNumber(env.STRATEGY_RM_MAX_MULTIPLIER, 2.2),
       autoSellEnabled: toBoolean(env.STRATEGY_AUTO_SELL_ENABLED, true),
+      sellAllOnExit: toBoolean(env.STRATEGY_SELL_ALL_ON_EXIT, true),
+      sellAllQtyPrecision: toPositiveInt(env.STRATEGY_SELL_ALL_QTY_PRECISION, 8),
       baseOrderAmountKrw: toPositiveNumber(env.STRATEGY_BASE_ORDER_AMOUNT_KRW, 5_000),
     },
     optimizer: {
@@ -212,6 +235,22 @@ export function loadConfig(env = process.env) {
       settingsFile: env.AI_SETTINGS_FILE || path.join(process.cwd(), ".trader", "ai-settings.json"),
       applyOverlay: toBoolean(env.AI_SETTINGS_APPLY_OVERLAY, true),
       applyKillSwitch: toBoolean(env.AI_SETTINGS_APPLY_KILL_SWITCH, true),
+      refreshMinSec: toPositiveInt(env.AI_SETTINGS_REFRESH_MIN_SEC, 1_800),
+      refreshMaxSec: toPositiveInt(env.AI_SETTINGS_REFRESH_MAX_SEC, 3_600),
+    },
+    marketUniverse: {
+      enabled: toBoolean(env.MARKET_UNIVERSE_ENABLED, true),
+      quote: String(env.MARKET_UNIVERSE_QUOTE || "KRW").trim().toUpperCase(),
+      minAccTradeValue24hKrw: toPositiveNumber(env.MARKET_UNIVERSE_MIN_ACC_TRADE_VALUE_24H_KRW, 20_000_000_000),
+      minPriceKrw: toPositiveNumber(env.MARKET_UNIVERSE_MIN_PRICE_KRW, 1),
+      maxSymbols: toPositiveInt(env.MARKET_UNIVERSE_MAX_SYMBOLS, 20),
+      includeSymbols: toCsvSymbols(env.MARKET_UNIVERSE_INCLUDE_SYMBOLS, universeDefaultIncludes),
+      excludeSymbols: toCsvSymbols(env.MARKET_UNIVERSE_EXCLUDE_SYMBOLS, []),
+      minBaseAssetLength: toPositiveInt(env.MARKET_UNIVERSE_MIN_BASE_ASSET_LENGTH, 2),
+      refreshMinSec: toPositiveInt(env.MARKET_UNIVERSE_REFRESH_MIN_SEC, 1_800),
+      refreshMaxSec: toPositiveInt(env.MARKET_UNIVERSE_REFRESH_MAX_SEC, 3_600),
+      snapshotFile: env.MARKET_UNIVERSE_FILE || path.join(process.cwd(), ".trader", "market-universe.json"),
+      tickerChunkSize: toPositiveInt(env.MARKET_UNIVERSE_TICKER_CHUNK_SIZE, 40),
     },
     execution: {
       enabled: toBoolean(env.EXECUTION_ENABLED, true),

@@ -23,54 +23,20 @@ npm start
 ```
 
 서비스는 `.env`의 `EXECUTION_*` 설정으로 자동매매 루프를 계속 실행합니다.
-AI가 `.trader/ai-settings.json`을 갱신하면 다음 실행 윈도우부터 자동 반영됩니다.
+AI가 `.trader/ai-settings.json`을 갱신하면 다음 AI 설정 스냅샷 갱신 주기(기본 30~60분)부터 자동 반영됩니다.
+AI 운용 주기는 30~60분 권장이며, 변경이 없으면 파일을 그대로 유지하면 됩니다.
 
-## 3) 먼저 실행 경로 점검
-
-```bash
-npm run start:once
-```
-
-## 4) API/소켓 연결 전체 점검(조회 전용)
+## 3) 실행 중 상태 확인
 
 ```bash
-npm run smoke
+tail -f .trader/http-audit.jsonl
 ```
-
-이 명령은 다음을 한 번에 확인합니다.
-
-- Private REST: 계좌/주문가능정보/주문리스트
-- Public REST: 현재가/분일주월 캔들
-- Public WS: ticker/trade/orderbook
-- Private WS: myAsset/myOrder 연결 열림 여부
-
-## 5) 주문+취소까지 자동 점검(실거래, 옵션)
-
-```bash
-npm run smoke:write
-```
-
-실행 조건:
-
-- `TRADER_PAPER_MODE=false`
-- `SMOKE_ENABLE_WRITES=true`
-- `SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND`
-
-## 6) 운영 점검/수동 제어가 필요할 때(옵션)
 
 ```bash
 cat .trader/state.json
 ```
 
-## 7) HTTP 감사로그 리포트 확인(옵션)
-
-```bash
-npm run audit:report
-```
-
-감사로그 파일 기본 위치는 `.trader/http-audit.jsonl` 입니다.
-
-## 8) 오버레이(AI 결과) 넣기 (옵션)
+## 4) 오버레이(AI 결과) 넣기 (옵션)
 
 ```bash
 cat > .trader/ai-settings.json <<'JSON'
@@ -82,8 +48,12 @@ cat > .trader/ai-settings.json <<'JSON'
     "symbol": "BTC_KRW",
     "orderAmountKrw": 5000,
     "windowSec": 300,
-    "cooldownSec": 30,
-    "dryRun": true
+    "cooldownSec": 30
+  },
+  "decision": {
+    "mode": "filter",
+    "allowBuy": true,
+    "allowSell": true
   },
   "overlay": {
     "multiplier": 0.8,
@@ -100,14 +70,16 @@ JSON
 
 오버레이는 주문 타이밍을 바꾸지 않고 주문금액 배율만 조정합니다.
 
-## 9) 긴급 정지 (옵션)
+AI가 직접 판단해 강제 액션을 내리려면 `decision.mode=override`와 `forceAction`을 함께 사용합니다.
+
+## 5) 긴급 정지 (옵션)
 
 ```bash
 cat > .trader/ai-settings.json <<'JSON'
 {
   "version": 1,
   "updatedAt": "2026-02-15T00:00:00.000Z",
-  "execution": { "enabled": true, "symbol": "BTC_KRW", "orderAmountKrw": 5000, "windowSec": 300, "cooldownSec": 30, "dryRun": true },
+  "execution": { "enabled": true, "symbol": "BTC_KRW", "orderAmountKrw": 5000, "windowSec": 300, "cooldownSec": 30 },
   "overlay": { "multiplier": 1.0, "score": null, "regime": null, "note": "kill switch on" },
   "controls": { "killSwitch": true }
 }
@@ -121,7 +93,7 @@ cat > .trader/ai-settings.json <<'JSON'
 {
   "version": 1,
   "updatedAt": "2026-02-15T00:00:00.000Z",
-  "execution": { "enabled": true, "symbol": "BTC_KRW", "orderAmountKrw": 5000, "windowSec": 300, "cooldownSec": 30, "dryRun": true },
+  "execution": { "enabled": true, "symbol": "BTC_KRW", "orderAmountKrw": 5000, "windowSec": 300, "cooldownSec": 30 },
   "overlay": { "multiplier": 1.0, "score": null, "regime": null, "note": "kill switch off" },
   "controls": { "killSwitch": false }
 }
