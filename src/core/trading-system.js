@@ -178,96 +178,6 @@ function trimTail(rows, limit) {
   return rows.length > cap ? rows.slice(-cap) : rows;
 }
 
-function normalizePaperWallet(wallet, initialCashKrw) {
-  const normalizedInitialCash = asNumber(initialCashKrw, 1_000_000);
-  const safeInitialCash = normalizedInitialCash !== null && normalizedInitialCash > 0 ? normalizedInitialCash : 1_000_000;
-
-  const base = {
-    cashKrw: safeInitialCash,
-    holdings: {},
-    initializedAt: nowIso(),
-    updatedAt: nowIso(),
-  };
-
-  if (!wallet || typeof wallet !== "object") {
-    return base;
-  }
-
-  const cashKrw = asNumber(wallet.cashKrw, safeInitialCash);
-  const holdingsRaw = wallet.holdings && typeof wallet.holdings === "object" ? wallet.holdings : {};
-  const holdings = {};
-
-  for (const [currencyRaw, row] of Object.entries(holdingsRaw)) {
-    const currency = String(currencyRaw || "").trim().toUpperCase();
-    if (!currency) {
-      continue;
-    }
-
-    const quantity = Math.max(asNumber(row?.quantity, 0), 0);
-    if (quantity <= 0) {
-      continue;
-    }
-
-    const avgBuyPrice = Math.max(asNumber(row?.avgBuyPrice, 0), 0);
-    holdings[currency] = {
-      quantity,
-      avgBuyPrice,
-      updatedAt: row?.updatedAt || nowIso(),
-    };
-  }
-
-  return {
-    cashKrw: Math.max(cashKrw, 0),
-    holdings,
-    initializedAt: wallet.initializedAt || nowIso(),
-    updatedAt: wallet.updatedAt || nowIso(),
-  };
-}
-
-function buildPaperAccountsFromWallet(wallet) {
-  const accounts = [
-    {
-      currency: "KRW",
-      unitCurrency: "KRW",
-      symbol: "KRW_KRW",
-      balance: Math.max(asNumber(wallet?.cashKrw, 0), 0),
-      locked: 0,
-      avgBuyPrice: 0,
-      raw: {
-        source: "paper_wallet",
-      },
-    },
-  ];
-
-  const holdings = wallet?.holdings && typeof wallet.holdings === "object" ? wallet.holdings : {};
-  for (const [currencyRaw, row] of Object.entries(holdings)) {
-    const currency = String(currencyRaw || "").trim().toUpperCase();
-    if (!currency) {
-      continue;
-    }
-
-    const quantity = Math.max(asNumber(row?.quantity, 0), 0);
-    if (quantity <= 0) {
-      continue;
-    }
-
-    const avgBuyPrice = Math.max(asNumber(row?.avgBuyPrice, 0), 0);
-    accounts.push({
-      currency,
-      unitCurrency: "KRW",
-      symbol: `${currency}_KRW`,
-      balance: quantity,
-      locked: 0,
-      avgBuyPrice,
-      raw: {
-        source: "paper_wallet",
-      },
-    });
-  }
-
-  return accounts;
-}
-
 function signalRiskMultiplier(signal, config) {
   const suggested = asNumber(signal?.metrics?.riskMultiplier, null);
   if (suggested === null || suggested <= 0) {
@@ -469,16 +379,6 @@ export class TradingSystem {
   async init() {
     await this.store.init();
     await this.store.update((state) => {
-      state.paperWallet = normalizePaperWallet(
-        state.paperWallet,
-        this.config.runtime.paperInitialCashKrw,
-      );
-
-      // Always align persisted runtime mode with current config at startup.
-      // This prevents stale state.json from silently forcing paper mode in live runs.
-      state.settings.paperMode = Boolean(this.config.runtime.paperMode);
-      state.settings.paperModeInitialized = true;
-      state.settings.paperReason = "runtime_config";
       if (typeof state.settings.killSwitch !== "boolean") {
         state.settings.killSwitch = false;
       }
@@ -495,25 +395,8 @@ export class TradingSystem {
     });
   }
 
-  paperMode() {
-    return Boolean(this.store.snapshot().settings.paperMode);
-  }
-
   hasKeys() {
     return Boolean(this.config.exchange.accessKey && this.config.exchange.secretKey);
-  }
-
-  getPaperWallet() {
-    const state = this.store.snapshot();
-    return normalizePaperWallet(state.paperWallet, this.config.runtime.paperInitialCashKrw);
-  }
-
-  async ensurePaperWallet() {
-    await this.store.update((state) => {
-      state.paperWallet = normalizePaperWallet(state.paperWallet, this.config.runtime.paperInitialCashKrw);
-      return state;
-    });
-    return this.getPaperWallet();
   }
 
   getOpenOrdersCount() {
@@ -524,13 +407,12 @@ export class TradingSystem {
 
   async status() {
     const state = this.store.snapshot();
-    const paperWallet = this.paperMode() ? normalizePaperWallet(state.paperWallet, this.config.runtime.paperInitialCashKrw) : null;
     return {
       ok: true,
       code: EXIT_CODES.OK,
       data: {
         now: nowIso(),
-        mode: this.paperMode() ? "paper" : "live",
+        mode: "live",
         killSwitch: Boolean(state.settings.killSwitch),
         defaultSymbol: this.config.strategy.defaultSymbol,
         strategy: {
@@ -545,35 +427,6 @@ export class TradingSystem {
         dailyPnlBaseline: state.settings.dailyPnlBaseline || null,
         openOrders: this.getOpenOrdersCount(),
         lastRun: state.system?.lastRun || null,
-        paper: paperWallet
-          ? {
-              cashKrw: paperWallet.cashKrw,
-              holdings: paperWallet.holdings,
-            }
-          : null,
-      },
-    };
-  }
-
-  async setPaperMode(enabled, reason = null) {
-    await this.store.update((state) => {
-      state.settings.paperMode = Boolean(enabled);
-      state.settings.paperReason = reason || null;
-      if (state.settings.paperMode) {
-        state.paperWallet = normalizePaperWallet(
-          state.paperWallet,
-          this.config.runtime.paperInitialCashKrw,
-        );
-      }
-      return state;
-    });
-
-    return {
-      ok: true,
-      code: EXIT_CODES.OK,
-      data: {
-        paperMode: Boolean(enabled),
-        reason: reason || null,
       },
     };
   }
@@ -744,7 +597,7 @@ export class TradingSystem {
         strategy: `${this.config.strategy.name}_realtime`,
         symbol: normalizedSymbol,
         startedAt,
-        mode: this.paperMode() ? "paper" : "live",
+        mode: "live",
         dryRun: Boolean(dryRun),
         status: "RUNNING",
       });
@@ -784,7 +637,7 @@ export class TradingSystem {
               const signal = this.signalEngine.evaluate(candlesFromPrices(prices));
               if (signal.action === "BUY") {
                 buySignals += 1;
-              } else {
+              } else if (signal.action === "SELL") {
                 sellSignals += 1;
               }
 
@@ -1075,23 +928,6 @@ export class TradingSystem {
   }
 
   async accountList() {
-    if (this.paperMode()) {
-      const wallet = await this.ensurePaperWallet();
-      const accounts = buildPaperAccountsFromWallet(wallet);
-      const metrics = calculateAccountMetrics(accounts);
-      await this.captureBalancesSnapshot("paper_account_list", accounts);
-      return {
-        ok: true,
-        code: EXIT_CODES.OK,
-        data: {
-          source: "paper_wallet",
-          count: accounts.length,
-          accounts,
-          metrics,
-        },
-      };
-    }
-
     try {
       const payload = await this.exchangeClient.getAccounts();
       const accounts = normalizeAccounts(payload);
@@ -1140,17 +976,6 @@ export class TradingSystem {
   }
 
   async loadAccountContext() {
-    if (this.paperMode()) {
-      const wallet = await this.ensurePaperWallet();
-      const accounts = buildPaperAccountsFromWallet(wallet);
-      await this.captureBalancesSnapshot("paper_risk_context", accounts);
-      return {
-        accounts,
-        metrics: calculateAccountMetrics(accounts),
-        source: "paper_wallet",
-      };
-    }
-
     try {
       const payload = await this.exchangeClient.getAccounts();
       const accounts = normalizeAccounts(payload);
@@ -1314,109 +1139,6 @@ export class TradingSystem {
     return overlay;
   }
 
-  async resolvePaperFillPrice(orderInput) {
-    const explicitPrice = asNumber(orderInput.price, null);
-    const isMarketBuy = orderInput.type === "market" && orderInput.side === "buy";
-    if (!isMarketBuy && explicitPrice !== null && explicitPrice > 0) {
-      return explicitPrice;
-    }
-
-    const ticker = await this.marketData.getMarketTicker(orderInput.symbol);
-    const metrics = this.marketData.extractTickerMetrics(ticker);
-    const lastPrice = asNumber(metrics?.lastPrice, null);
-    if (lastPrice === null || lastPrice <= 0) {
-      throw new Error(`Unable to resolve paper fill price for ${orderInput.symbol}`);
-    }
-    return lastPrice;
-  }
-
-  async applyPaperOrderToWallet(orderInput, fillPrice) {
-    const [baseCurrency, quoteCurrency] = String(orderInput.symbol || "").split("_");
-    if (!baseCurrency || quoteCurrency !== "KRW") {
-      throw new Error(`Paper trading supports *_KRW symbols only: ${orderInput.symbol}`);
-    }
-
-    const resolvedFillPrice = asNumber(fillPrice, null);
-    if (resolvedFillPrice === null || resolvedFillPrice <= 0) {
-      throw new Error("Invalid paper fill price");
-    }
-
-    const qty = computeQtyFromAmount(orderInput.amountKrw, resolvedFillPrice);
-    if (qty === null || qty <= 0) {
-      throw new Error("Unable to derive paper quantity from amount/price");
-    }
-
-    let fillResult = null;
-    await this.store.update((state) => {
-      state.paperWallet = normalizePaperWallet(
-        state.paperWallet,
-        this.config.runtime.paperInitialCashKrw,
-      );
-      const wallet = state.paperWallet;
-      const now = nowIso();
-      const holding = wallet.holdings[baseCurrency] || {
-        quantity: 0,
-        avgBuyPrice: 0,
-        updatedAt: now,
-      };
-
-      if (orderInput.side === "buy") {
-        if (wallet.cashKrw + 1e-9 < orderInput.amountKrw) {
-          throw new Error(
-            `Paper cash insufficient: ${wallet.cashKrw.toFixed(2)} < ${orderInput.amountKrw.toFixed(2)}`,
-          );
-        }
-
-        const prevQty = Math.max(asNumber(holding.quantity, 0), 0);
-        const prevAvg = Math.max(asNumber(holding.avgBuyPrice, 0), 0);
-        const newQty = prevQty + qty;
-        const newAvg = newQty > 0 ? (prevQty * prevAvg + qty * resolvedFillPrice) / newQty : 0;
-
-        wallet.cashKrw = Math.max(0, wallet.cashKrw - orderInput.amountKrw);
-        wallet.holdings[baseCurrency] = {
-          quantity: newQty,
-          avgBuyPrice: newAvg,
-          updatedAt: now,
-        };
-      } else {
-        const heldQty = Math.max(asNumber(holding.quantity, 0), 0);
-        if (heldQty + 1e-9 < qty) {
-          throw new Error(`Paper holding insufficient: ${baseCurrency} ${heldQty} < ${qty}`);
-        }
-
-        const proceeds = qty * resolvedFillPrice;
-        const remainingQty = Math.max(0, heldQty - qty);
-        wallet.cashKrw += proceeds;
-
-        if (remainingQty <= 1e-8) {
-          delete wallet.holdings[baseCurrency];
-        } else {
-          wallet.holdings[baseCurrency] = {
-            quantity: remainingQty,
-            avgBuyPrice: Math.max(asNumber(holding.avgBuyPrice, 0), 0),
-            updatedAt: now,
-          };
-        }
-      }
-
-      wallet.updatedAt = now;
-      fillResult = {
-        side: orderInput.side,
-        symbol: orderInput.symbol,
-        fillPrice: resolvedFillPrice,
-        qty,
-        notionalKrw: qty * resolvedFillPrice,
-        walletAfter: {
-          cashKrw: wallet.cashKrw,
-          holdings: wallet.holdings,
-        },
-      };
-      return state;
-    });
-
-    return fillResult;
-  }
-
   buildOrderInput({ symbol, side, type, amountKrw, price = null, clientOrderKey = null, strategyRunId = "manual" }) {
     const normalizedSymbol = normalizeSymbol(symbol || this.config.strategy.defaultSymbol);
     const normalizedSide = normalizeSide(side);
@@ -1532,11 +1254,8 @@ export class TradingSystem {
         price,
       });
 
-      let chanceMinTotalKrw = 0;
-      if (!this.paperMode()) {
-        const chance = await this.exchangeClient.getOrderChance({ symbol: orderInput.symbol });
-        chanceMinTotalKrw = parseMinTotal(chance, orderInput.side);
-      }
+      const chance = await this.exchangeClient.getOrderChance({ symbol: orderInput.symbol });
+      const chanceMinTotalKrw = parseMinTotal(chance, orderInput.side);
 
       const context = await this.evaluateRiskForOrder(orderInput, { chanceMinTotalKrw });
       if (!context.risk.allowed) {
@@ -1568,31 +1287,7 @@ export class TradingSystem {
         };
       }
 
-      let submitted;
-      if (this.paperMode()) {
-        const fillPrice = await this.resolvePaperFillPrice(orderInput);
-        const fill = await this.applyPaperOrderToWallet(orderInput, fillPrice);
-        submitted = {
-          id: uuid(),
-          exchangeOrderId: null,
-          state: "FILLED",
-          paper: true,
-          placedAt: nowIso(),
-          side: orderInput.side,
-          type: orderInput.type,
-          symbol: orderInput.symbol,
-          amountKrw: fill.notionalKrw,
-          price: fill.fillPrice,
-          qty: fill.qty,
-          clientOrderKey: orderInput.clientOrderKey,
-          raw: {
-            source: "paper_wallet",
-            fill,
-          },
-        };
-      } else {
-        submitted = await this.executionEngine.submit(orderInput);
-      }
+      const submitted = await this.executionEngine.submit(orderInput);
 
       await this.persistOrder(submitted, {
         reason,
@@ -1626,7 +1321,7 @@ export class TradingSystem {
       strategy: this.config.strategy.name,
       symbol: normalizedSymbol,
       startedAt,
-      mode: this.paperMode() ? "paper" : "live",
+      mode: "live",
       dryRun: Boolean(dryRun),
       status: "RUNNING",
     };
@@ -1870,19 +1565,6 @@ export class TradingSystem {
 
   async orderList(options = {}) {
     try {
-      if (this.paperMode()) {
-        const rows = this.store.snapshot().orders;
-        return {
-          ok: true,
-          code: EXIT_CODES.OK,
-          data: {
-            source: "local_paper",
-            count: rows.length,
-            orders: rows,
-          },
-        };
-      }
-
       const parseArrayOption = (value) => {
         if (Array.isArray(value)) {
           const rows = value.map((item) => String(item || "").trim()).filter(Boolean);
@@ -1939,16 +1621,6 @@ export class TradingSystem {
     }
 
     const local = this.store.snapshot().orders.find((order) => order.id === requested || order.exchangeOrderId === requested);
-    if (local?.paper) {
-      return {
-        ok: true,
-        code: EXIT_CODES.OK,
-        data: {
-          source: "local_paper",
-          order: local,
-        },
-      };
-    }
 
     try {
       const payload = await this.exchangeClient.getOrder({
@@ -1987,25 +1659,6 @@ export class TradingSystem {
     }
 
     const local = this.store.snapshot().orders.find((order) => order.id === requested || order.exchangeOrderId === requested);
-    if (local?.paper) {
-      await this.store.update((state) => {
-        const target = state.orders.find((order) => order.id === local.id);
-        if (target) {
-          target.state = "CANCELED";
-          target.updatedAt = nowIso();
-        }
-        return state;
-      });
-      return {
-        ok: true,
-        code: EXIT_CODES.OK,
-        data: {
-          source: "local_paper",
-          id: local.id,
-          state: "CANCELED",
-        },
-      };
-    }
 
     try {
       const exchangeOrderId = local?.exchangeOrderId || requested;

@@ -169,7 +169,7 @@ async function runSmoke() {
   const config = loadConfig(process.env);
   const report = {
     startedAt: nowIso(),
-    mode: config.runtime.paperMode ? "paper" : "live",
+    mode: "live",
     symbol: config.execution.symbol || config.strategy.defaultSymbol,
     market: toBithumbMarket(config.execution.symbol || config.strategy.defaultSymbol),
     checks: [],
@@ -328,8 +328,6 @@ async function runSmoke() {
       report.writeSmoke.error = "Missing API keys";
     } else if (writeConfirm !== "YES_I_UNDERSTAND") {
       report.writeSmoke.error = "Set SMOKE_WRITE_CONFIRM=YES_I_UNDERSTAND to enable write smoke";
-    } else if (config.runtime.paperMode) {
-      report.writeSmoke.error = "Write smoke requires TRADER_PAPER_MODE=false";
     } else if (!accountsCheck.ok || !chanceCheck.ok) {
       report.writeSmoke.error = "Write smoke requires successful account/chance checks";
     } else {

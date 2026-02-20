@@ -125,17 +125,15 @@ export function loadConfig(env = process.env) {
     runtime: {
       stateFile: env.TRADER_STATE_FILE || path.join(process.cwd(), ".trader", "state.json"),
       overlayFile: env.TRADER_OVERLAY_FILE || path.join(process.cwd(), ".trader", "overlay.json"),
-      httpAuditEnabled: toBoolean(env.TRADER_HTTP_AUDIT_ENABLED, true),
+      httpAuditEnabled: toBoolean(env.TRADER_HTTP_AUDIT_ENABLED, false),
       httpAuditFile: env.TRADER_HTTP_AUDIT_FILE || path.join(process.cwd(), ".trader", "http-audit.jsonl"),
       httpAuditMaxBytes: toNonNegativeInt(env.TRADER_HTTP_AUDIT_MAX_BYTES, 10 * 1024 * 1024),
       httpAuditPruneRatio: toNumber(env.TRADER_HTTP_AUDIT_PRUNE_RATIO, 0.7),
       httpAuditCheckEvery: toPositiveInt(env.TRADER_HTTP_AUDIT_CHECK_EVERY, 200),
       timezone: env.TZ || "Asia/Seoul",
-      paperMode: toBoolean(env.TRADER_PAPER_MODE, true),
-      paperInitialCashKrw: toPositiveNumber(env.TRADER_PAPER_INITIAL_CASH_KRW, 1_000_000),
       stateLockStaleMs: toPositiveInt(env.TRADER_STATE_LOCK_STALE_MS, 30_000),
       retention: {
-        keepLatestOnly: toBoolean(env.TRADER_STATE_KEEP_LATEST_ONLY, false),
+        keepLatestOnly: toBoolean(env.TRADER_STATE_KEEP_LATEST_ONLY, true),
         closedOrders: toNonNegativeInt(env.TRADER_RETENTION_CLOSED_ORDERS, 20),
         orders: toPositiveInt(env.TRADER_RETENTION_ORDERS, 400),
         orderEvents: toPositiveInt(env.TRADER_RETENTION_ORDER_EVENTS, 1000),
@@ -188,7 +186,7 @@ export function loadConfig(env = process.env) {
       candleCount: toPositiveInt(env.OPTIMIZER_CANDLE_COUNT, 200),
       initialCashKrw: toPositiveNumber(
         env.OPTIMIZER_INITIAL_CASH_KRW,
-        toPositiveNumber(env.TRADER_PAPER_INITIAL_CASH_KRW, 1_000_000),
+        1_000_000,
       ),
       baseOrderAmountKrw: toPositiveNumber(
         env.OPTIMIZER_BASE_ORDER_AMOUNT_KRW,
@@ -268,6 +266,8 @@ export function loadConfig(env = process.env) {
       dryRun: toBoolean(env.EXECUTION_DRY_RUN, false),
       restartDelayMs: toPositiveInt(env.EXECUTION_RESTART_DELAY_MS, 1_000),
       maxWindows: toNonNegativeInt(env.EXECUTION_MAX_WINDOWS, 0),
+      logOnlyOnActivity: toBoolean(env.EXECUTION_LOG_ONLY_ON_ACTIVITY, true),
+      heartbeatWindows: toPositiveInt(env.EXECUTION_LOG_HEARTBEAT_WINDOWS, 12),
     },
   };
 }

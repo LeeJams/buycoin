@@ -128,20 +128,12 @@ function aggregateWindowResults(results = []) {
 }
 
 function ensureLiveCredentials(config) {
-  if (config.runtime.paperMode) {
-    return;
-  }
-
   if (!config.exchange.accessKey || !config.exchange.secretKey) {
     throw new Error("Live mode requires BITHUMB_ACCESS_KEY and BITHUMB_SECRET_KEY");
   }
 }
 
-async function ensureLiveAccountPreflight(trader, config) {
-  if (config.runtime.paperMode) {
-    return;
-  }
-
+async function ensureLiveAccountPreflight(trader) {
   const accounts = await trader.accountList();
   if (!accounts.ok) {
     throw new Error(`Live preflight failed: ${accounts.error?.message || "account_list failed"}`);
@@ -162,6 +154,11 @@ export async function runExecutionService({
 } = {}) {
   const runtimeConfig = config || loadConfig(process.env);
   const aiRefreshRange = normalizeAiRefreshRange(runtimeConfig.ai);
+  const logOnlyOnActivity = runtimeConfig.execution?.logOnlyOnActivity !== false;
+  const heartbeatWindowsRaw = Number(runtimeConfig.execution?.heartbeatWindows);
+  const heartbeatWindows = Number.isFinite(heartbeatWindowsRaw) && heartbeatWindowsRaw > 0
+    ? Math.floor(heartbeatWindowsRaw)
+    : 12;
   const auditLog = system
     ? null
     : new HttpAuditLog(runtimeConfig.runtime.httpAuditFile, logger, {
@@ -188,8 +185,10 @@ export async function runExecutionService({
     await trader.init();
     await aiSettings.init();
     await marketUniverse.init();
-    ensureLiveCredentials(runtimeConfig);
-    await ensureLiveAccountPreflight(trader, runtimeConfig);
+    if (!system) {
+      ensureLiveCredentials(runtimeConfig);
+      await ensureLiveAccountPreflight(trader);
+    }
 
     if (!runtimeConfig.execution.enabled) {
       logger.info("execution service is disabled by config", {
@@ -217,7 +216,7 @@ export async function runExecutionService({
     process.on("SIGTERM", onSignal);
 
     logger.info("execution service started", {
-      mode: runtimeConfig.runtime.paperMode ? "paper" : "live",
+      mode: "live",
       symbol: runtimeConfig.execution.symbol,
       symbols: normalizeSymbolList(runtimeConfig.execution.symbols, runtimeConfig.execution.symbol),
       amountKrw: runtimeConfig.execution.orderAmountKrw,
@@ -232,6 +231,8 @@ export async function runExecutionService({
       marketUniverseFile: runtimeConfig.marketUniverse?.snapshotFile || null,
       httpAuditEnabled: runtimeConfig.runtime.httpAuditEnabled,
       httpAuditFile: runtimeConfig.runtime.httpAuditFile,
+      logOnlyOnActivity,
+      heartbeatWindows,
     });
 
     let windows = 0;
@@ -265,6 +266,7 @@ export async function runExecutionService({
     let lastKillSwitch = null;
     let lastStrategyHash = null;
     let lastDecisionHash = null;
+    let lastFilteredSymbolsHash = null;
     while (!stopRequested) {
       windows += 1;
 
@@ -386,14 +388,24 @@ export async function runExecutionService({
       const targetSymbols = filteredSymbols.symbols;
 
       if (filteredSymbols.filteredOut.length > 0) {
-        logger.warn("execution symbols filtered by market universe", {
-          window: windows,
-          source: aiRuntime.source,
+        const filteredHash = JSON.stringify({
           requestedSymbols,
-          acceptedSymbols: targetSymbols,
           rejectedSymbols: filteredSymbols.filteredOut,
           allowedCount: filteredSymbols.allowedCount,
         });
+        if (filteredHash !== lastFilteredSymbolsHash) {
+          logger.warn("execution symbols filtered by market universe", {
+            window: windows,
+            source: aiRuntime.source,
+            requestedSymbols,
+            acceptedSymbols: targetSymbols,
+            rejectedSymbols: filteredSymbols.filteredOut,
+            allowedCount: filteredSymbols.allowedCount,
+          });
+          lastFilteredSymbolsHash = filteredHash;
+        }
+      } else {
+        lastFilteredSymbolsHash = null;
       }
 
       if (targetSymbols.length === 0) {
@@ -433,41 +445,46 @@ export async function runExecutionService({
       );
 
       const aggregated = aggregateWindowResults(perSymbolResults);
+      const windowSummary = {
+        window: windows,
+        source: aiRuntime.source,
+        symbols: targetSymbols,
+        symbolCount: targetSymbols.length,
+        amountKrw: effective.orderAmountKrw,
+        tickCount: aggregated.totals.tickCount,
+        buySignals: aggregated.totals.buySignals,
+        sellSignals: aggregated.totals.sellSignals,
+        attemptedOrders: aggregated.totals.attemptedOrders,
+        successfulOrders: aggregated.totals.successfulOrders,
+      };
+      const perSymbolSummary = perSymbolResults.map((row) => ({
+        symbol: row.symbol,
+        ok: row.result?.ok === true,
+        code: row.result?.code ?? null,
+        tickCount: row.result?.data?.tickCount ?? 0,
+        buySignals: row.result?.data?.buySignals ?? 0,
+        sellSignals: row.result?.data?.sellSignals ?? 0,
+        attemptedOrders: row.result?.data?.attemptedOrders ?? 0,
+        successfulOrders: row.result?.data?.successfulOrders ?? 0,
+      }));
+      const hasOrderActivity = aggregated.totals.attemptedOrders > 0 || aggregated.totals.successfulOrders > 0;
+
       if (aggregated.failed.length === 0) {
-        logger.info("execution window completed", {
-          window: windows,
-          source: aiRuntime.source,
-          symbols: targetSymbols,
-          symbolCount: targetSymbols.length,
-          amountKrw: effective.orderAmountKrw,
-          tickCount: aggregated.totals.tickCount,
-          buySignals: aggregated.totals.buySignals,
-          sellSignals: aggregated.totals.sellSignals,
-          attemptedOrders: aggregated.totals.attemptedOrders,
-          successfulOrders: aggregated.totals.successfulOrders,
-          perSymbol: perSymbolResults.map((row) => ({
-            symbol: row.symbol,
-            ok: row.result?.ok === true,
-            code: row.result?.code ?? null,
-            tickCount: row.result?.data?.tickCount ?? 0,
-            buySignals: row.result?.data?.buySignals ?? 0,
-            sellSignals: row.result?.data?.sellSignals ?? 0,
-            attemptedOrders: row.result?.data?.attemptedOrders ?? 0,
-            successfulOrders: row.result?.data?.successfulOrders ?? 0,
-          })),
-        });
+        if (!logOnlyOnActivity || hasOrderActivity) {
+          logger.info("execution window completed", {
+            ...windowSummary,
+            perSymbol: perSymbolSummary,
+          });
+        } else if (windows % heartbeatWindows === 0) {
+          logger.info("execution window heartbeat", {
+            ...windowSummary,
+            reason: "no_order_activity",
+            heartbeatWindows,
+          });
+        }
       } else {
         logger.error("execution window failed", {
-          window: windows,
-          source: aiRuntime.source,
-          symbols: targetSymbols,
-          symbolCount: targetSymbols.length,
-          amountKrw: effective.orderAmountKrw,
-          tickCount: aggregated.totals.tickCount,
-          buySignals: aggregated.totals.buySignals,
-          sellSignals: aggregated.totals.sellSignals,
-          attemptedOrders: aggregated.totals.attemptedOrders,
-          successfulOrders: aggregated.totals.successfulOrders,
+          ...windowSummary,
           failures: aggregated.failed.map((row) => ({
             symbol: row.symbol,
             code: row.result?.code ?? null,

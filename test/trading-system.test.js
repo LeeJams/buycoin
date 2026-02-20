@@ -150,7 +150,6 @@ async function createConfig(extra = {}) {
   return loadConfig({
     TRADER_STATE_FILE: path.join(baseDir, "state.json"),
     TRADER_OVERLAY_FILE: path.join(baseDir, "overlay.json"),
-    TRADER_PAPER_MODE: "false",
     STRATEGY_NAME: "breakout",
     STRATEGY_BREAKOUT_LOOKBACK: "3",
     STRATEGY_BREAKOUT_BUFFER_BPS: "0",

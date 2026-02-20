@@ -6,7 +6,6 @@ function initialState() {
   return {
     version: 1,
     settings: {
-      paperMode: true,
       killSwitch: false,
       killSwitchReason: null,
       killSwitchAt: null,
@@ -16,7 +15,6 @@ function initialState() {
     fills: [],
     balancesSnapshot: [],
     holdings: [],
-    paperWallet: null,
     marketData: {
       ticks: [],
       candles: [],
@@ -47,6 +45,10 @@ function normalizeState(state) {
 
   delete normalized.proposals;
   delete normalized.approvals;
+  delete normalized.paperWallet;
+  delete normalized.settings.paperMode;
+  delete normalized.settings.paperModeInitialized;
+  delete normalized.settings.paperReason;
   return normalized;
 }
 

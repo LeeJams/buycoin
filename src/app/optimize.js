@@ -205,7 +205,7 @@ export async function optimizeAndApplyBest({
   const report = {
     generatedAt: nowIso(),
     source: "optimizer",
-    mode: runtimeConfig.runtime.paperMode ? "paper" : "live",
+    mode: "live",
     interval: runtimeConfig.optimizer.interval,
     candleCount: runtimeConfig.optimizer.candleCount,
     symbols: Object.keys(candlesBySymbol),

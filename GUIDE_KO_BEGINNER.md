@@ -14,7 +14,6 @@ npm install
 ```
 
 `.env`에 빗썸 키를 입력하세요.
-페이퍼 모드 기본 초기자금은 100만원입니다(`TRADER_PAPER_INITIAL_CASH_KRW`).
 
 ## 2) 실행형 서비스 시작
 

@@ -24,7 +24,6 @@ npm install
 ## 실행
 
 - 실행형 서비스: `npm start`
-- 페이퍼 모드 기본 초기자금: `1,000,000 KRW` (`TRADER_PAPER_INITIAL_CASH_KRW`로 변경 가능)
 - 기본 다중 종목은 `.env`의 `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,...` 로 지정 가능합니다.
 - 실행 중 유동성/품질 필터를 통과한 종목 목록이 `.trader/market-universe.json`에 저장됩니다.
 

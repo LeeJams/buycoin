@@ -49,9 +49,7 @@ class SystemMock {
 
 function baseConfig() {
   return {
-    runtime: {
-      paperMode: true,
-    },
+    runtime: {},
     exchange: {
       accessKey: "",
       secretKey: "",

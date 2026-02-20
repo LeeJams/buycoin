@@ -4,11 +4,10 @@ import { loadConfig, toBithumbMarket, normalizeSymbol } from "../src/config/defa
 
 test("defaults include orthodox strategy and overlay settings", () => {
   const config = loadConfig({});
-  assert.equal(config.runtime.paperInitialCashKrw, 1000000);
-  assert.equal(config.runtime.httpAuditEnabled, true);
+  assert.equal(config.runtime.httpAuditEnabled, false);
   assert.equal(config.runtime.httpAuditFile.endsWith(".trader/http-audit.jsonl"), true);
   assert.equal(config.runtime.httpAuditMaxBytes, 10 * 1024 * 1024);
-  assert.equal(config.runtime.retention.keepLatestOnly, false);
+  assert.equal(config.runtime.retention.keepLatestOnly, true);
   assert.equal(config.runtime.retention.closedOrders, 20);
   assert.equal(config.runtime.retention.orders, 400);
   assert.equal(config.runtime.retention.orderEvents, 1000);
@@ -50,6 +49,8 @@ test("defaults include orthodox strategy and overlay settings", () => {
   assert.equal(config.execution.cooldownSec, 30);
   assert.equal(config.execution.dryRun, false);
   assert.equal(config.execution.maxWindows, 0);
+  assert.equal(config.execution.logOnlyOnActivity, true);
+  assert.equal(config.execution.heartbeatWindows, 12);
   assert.equal(config.optimizer.enabled, true);
   assert.equal(config.optimizer.reoptEnabled, true);
   assert.equal(config.optimizer.reoptIntervalSec, 3600);

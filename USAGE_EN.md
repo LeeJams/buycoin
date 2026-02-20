@@ -24,7 +24,6 @@ Configure `.env` from `.env.example`.
 ## Runtime
 
 - Execution service: `npm start`
-- Paper mode default starting cash: `1,000,000 KRW` (override with `TRADER_PAPER_INITIAL_CASH_KRW`)
 - You can set default multi-symbol execution via `.env` with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,...`.
 - Runtime writes curated tradable symbols to `.trader/market-universe.json`.
 

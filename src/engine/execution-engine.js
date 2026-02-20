@@ -40,7 +40,6 @@ export class ExecutionEngine {
       id: uuid(),
       exchangeOrderId: resolveExchangeOrderId(response),
       state: "ACCEPTED",
-      paper: false,
       placedAt: nowIso(),
       side: orderInput.side,
       type: orderInput.type,

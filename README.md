@@ -65,13 +65,14 @@ Default refresh cadence is 30-60 minutes (`AI_SETTINGS_REFRESH_MIN_SEC=1800`, `A
 It also refreshes a curated KRW market universe snapshot in `.trader/market-universe.json`.
 Symbols outside this universe are automatically filtered out from `execution.symbols`.
 You can set multi-symbol runtime defaults with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,USDT_KRW`.
+Default runtime logging is activity-first:
+- detailed `execution window completed` logs only when orders were attempted
+- idle windows emit heartbeat logs every `EXECUTION_LOG_HEARTBEAT_WINDOWS` windows (default `12`)
 
-## Paper Trading
+## Live Runtime
 
-- `TRADER_PAPER_MODE=true` enables simulated execution.
-- Default paper starting cash is `1,000,000 KRW`.
-- You can override with `TRADER_PAPER_INITIAL_CASH_KRW`.
-- In paper mode, `account list` returns simulated balances from local state.
+- Runtime is configured for live trading operation.
+- Startup performs account preflight (`/v1/accounts`) before entering execution loop.
 
 ## Default Trading Strategy
 
@@ -315,7 +316,7 @@ To avoid illiquid or questionable symbols while still scanning many Bithumb mark
 - Runtime observability is log-driven (JSON logs to stdout/stderr).
 - Runtime state is persisted in `TRADER_STATE_FILE` (default `.trader/state.json`).
 - State collections are retention-capped (see `TRADER_RETENTION_*`).
-- Set `TRADER_STATE_KEEP_LATEST_ONLY=true` to keep only latest snapshots + open orders (+ a small closed-order tail).
+- Default is `TRADER_STATE_KEEP_LATEST_ONLY=true` to keep only latest snapshots + open orders (+ a small closed-order tail).
 
 ## WebSocket Coverage
 
@@ -338,6 +339,15 @@ Each exchange HTTP call is logged to JSONL audit trail:
 - enable/disable: `TRADER_HTTP_AUDIT_ENABLED`
 - file path: `TRADER_HTTP_AUDIT_FILE` (default `.trader/http-audit.jsonl`)
 - auto rotation: `TRADER_HTTP_AUDIT_MAX_BYTES`, `TRADER_HTTP_AUDIT_PRUNE_RATIO`, `TRADER_HTTP_AUDIT_CHECK_EVERY`
+- default is disabled (`TRADER_HTTP_AUDIT_ENABLED=false`) to reduce file growth in 24/7 runs
+
+## Execution Log Volume Control
+
+- `EXECUTION_LOG_ONLY_ON_ACTIVITY` (default `true`)
+  - `true`: print full window log only when order activity exists
+  - `false`: print full window log every window
+- `EXECUTION_LOG_HEARTBEAT_WINDOWS` (default `12`)
+  - when activity-only logging is on, emit one heartbeat summary every N windows
 
 ## Safety Controls
 
