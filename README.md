@@ -24,6 +24,16 @@ AI/ML role:
 - Strategy run is immediate and rule-based
 - Added real-time WebSocket ticker mode (`socket.md` spec)
 - Primary runtime is daemon execution (`npm start`)
+- Removed paper/simulation runtime path (`TRADER_PAPER_MODE`, `TRADER_PAPER_INITIAL_CASH_KRW`)
+- Runtime is live-only with mandatory startup account preflight
+- Default storage profile is reduced-growth (`TRADER_STATE_KEEP_LATEST_ONLY=true`, `TRADER_HTTP_AUDIT_ENABLED=false`)
+
+## Breaking Change (Live-Only)
+
+- Paper mode is removed from runtime behavior and env contract.
+- `npm start` always runs live execution path.
+- If API keys are missing or account preflight fails, process exits before execution loop.
+- There is no CLI command mode; operation is daemon + file-driven settings (`.env`, `.trader/ai-settings.json`).
 
 ## Requirements
 
@@ -51,9 +61,20 @@ Key groups:
 - Market universe: `MARKET_UNIVERSE_*` (liquidity/quality filtered tradable symbols)
 - Overlay: `OVERLAY_*` (AI/ML cache settings)
 
+Unsupported/removed vars:
+
+- `TRADER_PAPER_MODE`
+- `TRADER_PAPER_INITIAL_CASH_KRW`
+
 ## Quick Start
 
-### 1) Run as execution service (daemon)
+### 1) Configure `.env`
+
+- Copy `.env.example` to `.env`.
+- Fill `BITHUMB_ACCESS_KEY` and `BITHUMB_SECRET_KEY`.
+- Review risk/execution defaults before first run (`RISK_*`, `EXECUTION_*`).
+
+### 2) Run as execution service (daemon, live)
 
 ```bash
 npm start
@@ -68,6 +89,20 @@ You can set multi-symbol runtime defaults with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KR
 Default runtime logging is activity-first:
 - detailed `execution window completed` logs only when orders were attempted
 - idle windows emit heartbeat logs every `EXECUTION_LOG_HEARTBEAT_WINDOWS` windows (default `12`)
+
+### 3) Verify runtime health quickly
+
+Look for these startup logs:
+
+- `live preflight passed`: account/auth check succeeded
+- `execution service started`: loop is active
+- `strategy updated from ai settings` / `overlay updated from ai settings`: AI snapshot applied
+
+Window summary interpretation:
+
+- `buySignals` / `sellSignals`: strategy signal count
+- `attemptedOrders`: order submissions attempted
+- `successfulOrders`: exchange accepted orders
 
 ## Live Runtime
 
@@ -127,7 +162,7 @@ Default schema:
     "name": "risk_managed_momentum",
     "defaultSymbol": "BTC_KRW",
     "candleInterval": "15m",
-    "candleCount": 200,
+    "candleCount": 120,
     "momentumLookback": 24,
     "volatilityLookback": 72,
     "momentumEntryBps": 12,
@@ -312,6 +347,7 @@ To avoid illiquid or questionable symbols while still scanning many Bithumb mark
 ## No CLI Mode
 
 - CLI mode is intentionally removed.
+- Paper mode is intentionally removed (live-only runtime).
 - Runtime control is file-driven (`.env` + `AI_SETTINGS_FILE`).
 - Runtime observability is log-driven (JSON logs to stdout/stderr).
 - Runtime state is persisted in `TRADER_STATE_FILE` (default `.trader/state.json`).
@@ -332,6 +368,22 @@ Default endpoints:
 
 Private streams use JWT header auth (`authorization: Bearer ...`) and documented error frames are surfaced as runtime errors.
 
+## Bithumb Rate Limit Compliance
+
+The runtime is tuned to Bithumb official limits by default:
+
+- Public API: `BITHUMB_PUBLIC_MAX_PER_SEC=150`
+- Private API: `BITHUMB_PRIVATE_MAX_PER_SEC=140`
+- WebSocket connect throttle: `BITHUMB_WS_CONNECT_MAX_PER_SEC=5`
+
+Behavior:
+
+- HTTP requests pass through internal rate limiter queues
+- Retryable failures use exponential backoff
+- Order path remains protected from burst overshoot
+
+If needed, lower these values in `.env` for extra safety. Avoid setting values above exchange policy.
+
 ## HTTP Audit Log
 
 Each exchange HTTP call is logged to JSONL audit trail:
@@ -348,6 +400,22 @@ Each exchange HTTP call is logged to JSONL audit trail:
   - `false`: print full window log every window
 - `EXECUTION_LOG_HEARTBEAT_WINDOWS` (default `12`)
   - when activity-only logging is on, emit one heartbeat summary every N windows
+
+## Runtime Files (`.trader`)
+
+Generated/used files:
+
+- `.trader/ai-settings.json`: AI supervisor input snapshot (main control file)
+- `.trader/state.json`: latest runtime state (balances snapshots, order/fill/event tails, system status)
+- `.trader/market-universe.json`: filtered tradable symbol set
+- `.trader/overlay.json`: local overlay cache store
+- `.trader/http-audit.jsonl`: optional HTTP audit trail (only when enabled)
+
+Growth controls:
+
+- `TRADER_STATE_KEEP_LATEST_ONLY=true` keeps only latest snapshots + open orders + short closed-order tail
+- `TRADER_RETENTION_*` caps each state collection
+- `TRADER_HTTP_AUDIT_ENABLED=false` by default to avoid large JSONL growth in 24/7 runs
 
 ## Safety Controls
 
