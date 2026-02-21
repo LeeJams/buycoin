@@ -14,6 +14,95 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function roundNum(value, digits = 4) {
+  if (!Number.isFinite(Number(value))) {
+    return null;
+  }
+  const scale = 10 ** digits;
+  return Math.round(Number(value) * scale) / scale;
+}
+
+function asNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function evaluateExecutionKpiGuard(kpi = {}, config = {}, options = {}) {
+  if (options.dryRun === true) {
+    return {
+      enabled: false,
+      triggered: false,
+      reasons: ["dry_run_skipped"],
+      metrics: null,
+      thresholds: null,
+    };
+  }
+
+  if (!config || config.kpiGuardEnabled !== true) {
+    return {
+      enabled: false,
+      triggered: false,
+      reasons: [],
+      metrics: null,
+      thresholds: null,
+    };
+  }
+
+  const minTrades = asNumber(config.kpiGuardMinTrades, 0);
+  const minWinRatePct = asNumber(config.kpiGuardMinWinRatePct, null);
+  const maxSlippageBps = asNumber(config.kpiGuardMaxAbsSlippageBps, null);
+  const minExpectancyKrw = asNumber(config.kpiGuardMinExpectancyKrw, null);
+
+  const realized = kpi?.realized || {};
+  const fills = kpi?.fills || {};
+  const metrics = {
+    tradeCount: asNumber(realized.tradeCount, 0) ?? 0,
+    winRatePct: asNumber(realized.winRatePct, null),
+    expectancyKrw: asNumber(realized.expectancyKrw, null),
+    avgAbsSlippageBps: asNumber(fills.avgAbsSlippageBps, null),
+  };
+
+  if (Number.isFinite(minTrades) && metrics.tradeCount < minTrades) {
+    return {
+      enabled: true,
+      triggered: false,
+      reasons: ["insufficient_trades_for_guard"],
+      metrics,
+      thresholds: {
+        minTrades,
+        minWinRatePct,
+        maxSlippageBps,
+        minExpectancyKrw,
+      },
+    };
+  }
+
+  const reasons = [];
+  if (Number.isFinite(minWinRatePct) && Number.isFinite(metrics.winRatePct) && metrics.winRatePct < minWinRatePct) {
+    reasons.push(`low_win_rate:${metrics.winRatePct.toFixed(4)} < ${minWinRatePct}`);
+  }
+  if (Number.isFinite(minExpectancyKrw) && Number.isFinite(metrics.expectancyKrw) && metrics.expectancyKrw < minExpectancyKrw) {
+    reasons.push(`low_expectancy:${metrics.expectancyKrw.toFixed(2)} < ${minExpectancyKrw}`);
+  }
+  if (Number.isFinite(maxSlippageBps) && Number.isFinite(metrics.avgAbsSlippageBps)
+    && metrics.avgAbsSlippageBps > maxSlippageBps) {
+    reasons.push(`high_slippage:${metrics.avgAbsSlippageBps.toFixed(4)} > ${maxSlippageBps}`);
+  }
+
+  return {
+    enabled: true,
+    triggered: reasons.length > 0,
+    reasons,
+    metrics,
+    thresholds: {
+      minTrades,
+      minWinRatePct,
+      maxSlippageBps,
+      minExpectancyKrw,
+    },
+  };
+}
+
 function normalizeSymbolList(symbols, fallbackSymbol = "BTC_KRW") {
   let source = [];
   if (Array.isArray(symbols)) {
@@ -127,6 +216,32 @@ function aggregateWindowResults(results = []) {
   };
 }
 
+function isRetryableFailureRow(row) {
+  return row?.result?.code === EXIT_CODES.EXCHANGE_RETRYABLE;
+}
+
+function calculateWindowDelayMs(executionConfig, streamFailureStreak = 0) {
+  const baseDelayMs = Number.isFinite(Number(executionConfig?.restartDelayMs))
+    ? Math.max(0, Math.floor(Number(executionConfig.restartDelayMs)))
+    : 1_000;
+  const threshold = Number.isFinite(Number(executionConfig?.streamFailureRetryThreshold))
+    ? Math.max(1, Math.floor(Number(executionConfig.streamFailureRetryThreshold)))
+    : 1;
+  if (streamFailureStreak < threshold) {
+    return baseDelayMs;
+  }
+
+  const baseBackoffMs = Number.isFinite(Number(executionConfig?.streamFailureBackoffBaseMs))
+    ? Math.max(baseDelayMs, Math.floor(Number(executionConfig.streamFailureBackoffBaseMs)))
+    : Math.max(2_000, baseDelayMs);
+  const maxBackoffMs = Number.isFinite(Number(executionConfig?.streamFailureBackoffMaxMs))
+    ? Math.max(baseBackoffMs, Math.floor(Number(executionConfig.streamFailureBackoffMaxMs)))
+    : baseBackoffMs * 16;
+
+  const exponent = Math.min(streamFailureStreak - threshold + 1, 10);
+  return Math.min(maxBackoffMs, Math.max(baseBackoffMs, baseBackoffMs * 2 ** (exponent - 1)));
+}
+
 function ensureLiveCredentials(config) {
   if (!config.exchange.accessKey || !config.exchange.secretKey) {
     throw new Error("Live mode requires BITHUMB_ACCESS_KEY and BITHUMB_SECRET_KEY");
@@ -139,12 +254,12 @@ async function ensureLiveAccountPreflight(trader) {
     throw new Error(`Live preflight failed: ${accounts.error?.message || "account_list failed"}`);
   }
 
-  logger.info("live preflight passed", {
-    accountCount: accounts.data.count,
-    cashKrw: Math.round(accounts.data.metrics.cashKrw || 0),
-    exposureKrw: Math.round(accounts.data.metrics.exposureKrw || 0),
-  });
-}
+    logger.info("live preflight passed", {
+      accountCount: accounts.data.count,
+      cashKrw: Math.round(accounts.data.metrics.cashAvailableKrw || accounts.data.metrics.cashKrw || 0),
+      exposureKrw: Math.round(accounts.data.metrics.exposureKrw || 0),
+    });
+  }
 
 export async function runExecutionService({
   system = null,
@@ -155,10 +270,11 @@ export async function runExecutionService({
   const runtimeConfig = config || loadConfig(process.env);
   const aiRefreshRange = normalizeAiRefreshRange(runtimeConfig.ai);
   const logOnlyOnActivity = runtimeConfig.execution?.logOnlyOnActivity !== false;
+  const executionDryRun = Boolean(runtimeConfig.execution?.dryRun === true);
   const heartbeatWindowsRaw = Number(runtimeConfig.execution?.heartbeatWindows);
-  const heartbeatWindows = Number.isFinite(heartbeatWindowsRaw) && heartbeatWindowsRaw > 0
-    ? Math.floor(heartbeatWindowsRaw)
-    : 12;
+    const heartbeatWindows = Number.isFinite(heartbeatWindowsRaw) && heartbeatWindowsRaw > 0
+      ? Math.floor(heartbeatWindowsRaw)
+      : 12;
   const auditLog = system
     ? null
     : new HttpAuditLog(runtimeConfig.runtime.httpAuditFile, logger, {
@@ -185,7 +301,7 @@ export async function runExecutionService({
     await trader.init();
     await aiSettings.init();
     await marketUniverse.init();
-    if (!system) {
+    if (!system && !executionDryRun) {
       ensureLiveCredentials(runtimeConfig);
       await ensureLiveAccountPreflight(trader);
     }
@@ -216,7 +332,7 @@ export async function runExecutionService({
     process.on("SIGTERM", onSignal);
 
     logger.info("execution service started", {
-      mode: "live",
+      mode: executionDryRun ? "dry_run" : "live",
       symbol: runtimeConfig.execution.symbol,
       symbols: normalizeSymbolList(runtimeConfig.execution.symbols, runtimeConfig.execution.symbol),
       amountKrw: runtimeConfig.execution.orderAmountKrw,
@@ -239,6 +355,9 @@ export async function runExecutionService({
     let aiRuntime = await aiSettings.read();
     let aiRefresh = nextAiRefreshDelay(aiRefreshRange);
     let nextAiRefreshAt = Date.now() + aiRefresh.ms;
+    let streamFailureStreak = 0;
+    let lastRuntimeKillSwitch = null;
+    let kpiSinceMs = Date.now();
 
     if (aiSettings.enabled) {
       logger.info("ai settings snapshot loaded", {
@@ -371,9 +490,11 @@ export async function runExecutionService({
           window: windows,
           source: aiRuntime.source,
         });
+        kpiSinceMs = Math.max(kpiSinceMs, Date.now());
+        const windowDelayMs = calculateWindowDelayMs(runtimeConfig.execution, streamFailureStreak);
 
         if (!stopRequested) {
-          await sleep(runtimeConfig.execution.restartDelayMs);
+          await sleep(windowDelayMs);
         }
 
         if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
@@ -408,6 +529,50 @@ export async function runExecutionService({
         lastFilteredSymbolsHash = null;
       }
 
+      const executionStatus = await trader.status();
+      const runtimeKillSwitch = Boolean(executionStatus?.data?.killSwitch);
+      if (lastRuntimeKillSwitch !== runtimeKillSwitch) {
+        if (runtimeKillSwitch) {
+          logger.warn("execution window skipped: kill switch active", {
+            window: windows,
+            source: aiRuntime.source,
+            reason: executionStatus?.data?.killSwitchReason || "runtime_risk_control",
+          });
+        }
+        lastRuntimeKillSwitch = runtimeKillSwitch;
+      }
+      if (runtimeKillSwitch) {
+        const windowDelayMs = calculateWindowDelayMs(runtimeConfig.execution, streamFailureStreak);
+        kpiSinceMs = Math.max(kpiSinceMs, Date.now());
+
+        if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
+          stoppedBy = "window_limit";
+          break;
+        }
+        if (!stopRequested) {
+          await sleep(windowDelayMs);
+        }
+        continue;
+      }
+
+      try {
+        const reconcileResult = await trader.reconcileOpenOrders({ maxCandidates: 8 });
+        if (reconcileResult.failed > 0 && runtimeConfig.execution?.logOnlyOnActivity) {
+          logger.warn("open order reconciliation had failures", {
+            window: windows,
+            openCount: reconcileResult.openCount,
+            candidates: reconcileResult.candidates,
+            reconciled: reconcileResult.reconciled,
+            failed: reconcileResult.failed,
+          });
+        }
+      } catch (error) {
+        logger.warn("open order reconciliation failed", {
+          window: windows,
+          reason: error.message,
+        });
+      }
+
       if (targetSymbols.length === 0) {
         logger.warn("execution window skipped: no symbols passed market universe filter", {
           window: windows,
@@ -415,13 +580,15 @@ export async function runExecutionService({
           requestedSymbols,
           allowedCount: filteredSymbols.allowedCount,
         });
+        const windowDelayMs = calculateWindowDelayMs(runtimeConfig.execution, streamFailureStreak);
+        kpiSinceMs = Math.max(kpiSinceMs, Date.now());
 
         if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
           stoppedBy = "window_limit";
           break;
         }
         if (!stopRequested) {
-          await sleep(runtimeConfig.execution.restartDelayMs);
+          await sleep(windowDelayMs);
         }
         continue;
       }
@@ -434,7 +601,7 @@ export async function runExecutionService({
             amount: effective.orderAmountKrw,
             durationSec: effective.windowSec,
             cooldownSec: effective.cooldownSec,
-            dryRun: false,
+            dryRun: executionDryRun,
             executionPolicy,
           });
           return {
@@ -445,9 +612,20 @@ export async function runExecutionService({
       );
 
       const aggregated = aggregateWindowResults(perSymbolResults);
+      const kpiUntilMs = Date.now();
+      const executionKpi = trader.computeExecutionKpi({
+        sinceMs: kpiSinceMs,
+        untilMs: kpiUntilMs,
+      });
+      kpiSinceMs = kpiUntilMs;
+      const kpiGuard = evaluateExecutionKpiGuard(executionKpi, runtimeConfig.execution, {
+        dryRun: executionDryRun,
+      });
+
       const windowSummary = {
         window: windows,
         source: aiRuntime.source,
+        mode: executionDryRun ? "dry_run" : "live",
         symbols: targetSymbols,
         symbolCount: targetSymbols.length,
         amountKrw: effective.orderAmountKrw,
@@ -456,7 +634,47 @@ export async function runExecutionService({
         sellSignals: aggregated.totals.sellSignals,
         attemptedOrders: aggregated.totals.attemptedOrders,
         successfulOrders: aggregated.totals.successfulOrders,
+        executionKpi: {
+          dryRun: executionDryRun,
+          fills: {
+            count: executionKpi.fills.count,
+            buyCount: executionKpi.fills.buyCount,
+            sellCount: executionKpi.fills.sellCount,
+            totalAmountKrw: roundNum(executionKpi.fills.totalAmountKrw, 2),
+            totalFeeKrw: roundNum(executionKpi.fills.totalFeeKrw, 2),
+            avgSignedSlippageBps: roundNum(executionKpi.fills.avgSignedSlippageBps, 4),
+            avgAbsSlippageBps: roundNum(executionKpi.fills.avgAbsSlippageBps, 4),
+          },
+          realized: {
+            tradeCount: executionKpi.realized.tradeCount,
+            wins: executionKpi.realized.wins,
+            losses: executionKpi.realized.losses,
+            breakEven: executionKpi.realized.breakEven,
+            winRatePct: roundNum(executionKpi.realized.winRatePct, 4),
+            expectancyKrw: roundNum(executionKpi.realized.expectancyKrw, 2),
+            realizedPnlKrw: roundNum(executionKpi.realized.realizedPnlKrw, 2),
+          },
+          positionsTracked: Object.keys(executionKpi.positions || {}).length,
+        },
+        kpiGuard,
       };
+      if (kpiGuard.triggered && !executionDryRun) {
+        logger.error("execution kpi guard triggered", {
+          window: windows,
+          source: aiRuntime.source,
+          symbol: targetSymbols,
+          kpiGuard,
+        });
+        if (typeof trader.setKillSwitch === "function") {
+          await trader.setKillSwitch(true, `kpi_guard: ${kpiGuard.reasons.join(", ") || "unknown"}`);
+        }
+        stoppedBy = "kpi_guard";
+        stopRequested = true;
+      }
+
+      if (typeof trader.recordExecutionKpi === "function") {
+        await trader.recordExecutionKpi(windowSummary);
+      }
       const perSymbolSummary = perSymbolResults.map((row) => ({
         symbol: row.symbol,
         ok: row.result?.ok === true,
@@ -468,6 +686,25 @@ export async function runExecutionService({
         successfulOrders: row.result?.data?.successfulOrders ?? 0,
       }));
       const hasOrderActivity = aggregated.totals.attemptedOrders > 0 || aggregated.totals.successfulOrders > 0;
+      const allFailedRetryable = aggregated.failed.length > 0 && aggregated.failed.every(isRetryableFailureRow);
+      if (aggregated.failed.length === 0) {
+        streamFailureStreak = 0;
+      } else if (allFailedRetryable) {
+        streamFailureStreak += 1;
+      } else {
+        streamFailureStreak = 0;
+      }
+
+      const windowDelayMs = calculateWindowDelayMs(runtimeConfig.execution, streamFailureStreak);
+      if (windowDelayMs > runtimeConfig.execution.restartDelayMs) {
+        logger.warn("execution window delay increased due repeated retryable failures", {
+          windows,
+          streak: streamFailureStreak,
+          delayMs: windowDelayMs,
+          restartDelayMs: runtimeConfig.execution.restartDelayMs,
+          failedSymbols: aggregated.failed.map((row) => row.symbol),
+        });
+      }
 
       if (aggregated.failed.length === 0) {
         if (!logOnlyOnActivity || hasOrderActivity) {
@@ -494,13 +731,17 @@ export async function runExecutionService({
         });
       }
 
+      if (stopRequested) {
+        break;
+      }
+
       if (stopAfterWindows > 0 && windows >= stopAfterWindows) {
         stoppedBy = "window_limit";
         break;
       }
 
       if (!stopRequested) {
-        await sleep(runtimeConfig.execution.restartDelayMs);
+        await sleep(windowDelayMs);
       }
     }
 

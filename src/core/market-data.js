@@ -120,6 +120,33 @@ function normalizeCandleRows(rows, symbol, interval) {
   }));
 }
 
+function isUsableTickerPayload(payload) {
+  if (payload === null || payload === undefined) {
+    return false;
+  }
+  if (Array.isArray(payload)) {
+    return payload.length > 0;
+  }
+  if (typeof payload !== "object") {
+    return false;
+  }
+
+  if (payload.data && typeof payload.data === "object") {
+    return isUsableTickerPayload(payload.data);
+  }
+
+  if (payload.status && String(payload.status) !== "0000" && String(payload.status) !== "1" && String(payload.status) !== "0") {
+    return false;
+  }
+
+  const hasPrice = asNumber(payload.trade_price) !== null
+    || asNumber(payload.closing_price) !== null
+    || asNumber(payload.candle_acc_trade_price) !== null
+    || asNumber(payload.acc_trade_price_24h) !== null
+    || asNumber(payload.acc_trade_value_24h) !== null;
+  return hasPrice;
+}
+
 export class MarketDataService {
   constructor(config, exchangeClient = null) {
     this.config = config;
@@ -157,12 +184,21 @@ export class MarketDataService {
   async getMarketTicker(symbol) {
     const market = toBithumbMarket(symbol);
     const legacy = symbol.toUpperCase();
-    const candidates = [{ path: "/v1/ticker", query: { markets: market } }, { path: `/public/ticker/${legacy}`, query: {} }];
+    const legacyDashed = market;
+    const candidates = [
+      { path: "/v1/ticker", query: { markets: market } },
+      { path: "/v1/ticker", query: { markets: legacy } },
+      { path: `/public/ticker/${legacyDashed}`, query: {} },
+      { path: `/public/ticker/${legacy}`, query: {} },
+    ];
 
     let lastError = null;
     for (const candidate of candidates) {
       try {
         const payload = await this.publicGet(candidate.path, candidate.query);
+        if (!isUsableTickerPayload(payload)) {
+          throw new Error(`Invalid ticker payload from ${candidate.path}`);
+        }
         const queryString = new URLSearchParams(candidate.query || {}).toString();
         const sourceUrl = queryString
           ? `${this.config.exchange.baseUrl}${candidate.path}?${queryString}`

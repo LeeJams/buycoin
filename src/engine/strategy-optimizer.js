@@ -6,6 +6,14 @@ function asNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asPositiveInt(value, fallback) {
+  const parsed = asNumber(value, fallback);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.max(1, Math.floor(parsed));
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -30,15 +38,53 @@ function normalizeCandles(candles = []) {
       const tsKst = Date.parse(row?.candleTimeKst || "");
       const timestamp = tsDirect ?? (Number.isFinite(tsUtc) ? tsUtc : Number.isFinite(tsKst) ? tsKst : index + 1);
       const close = asNumber(row?.close, null);
+      const high = asNumber(row?.high, close);
+      const low = asNumber(row?.low, close);
       return {
         timestamp,
         close,
+        high,
+        low,
       };
     })
-    .filter((row) => row.close !== null && row.close > 0);
+    .filter((row) => row.close !== null && row.close > 0 && row.high !== null && row.high > 0 && row.low !== null && row.low > 0);
 
   rows.sort((a, b) => a.timestamp - b.timestamp);
   return rows;
+}
+
+function safeMean(values = []) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function buildWalkForwardFolds(totalCount, config = {}) {
+  const trainWindow = asPositiveInt(config.trainWindow, 80);
+  const testWindow = asPositiveInt(config.testWindow, 40);
+  const stepWindow = asPositiveInt(config.stepWindow, 30);
+  const maxFolds = asPositiveInt(config.maxFolds, 0);
+
+  const folds = [];
+  if (!trainWindow || !testWindow || !stepWindow || totalCount < trainWindow + testWindow) {
+    return folds;
+  }
+
+  for (let testStart = trainWindow; testStart + testWindow <= totalCount; testStart += stepWindow) {
+    if (maxFolds > 0 && folds.length >= maxFolds) {
+      break;
+    }
+    folds.push({
+      trainStart: 0,
+      trainEnd: testStart,
+      testStart,
+      testEnd: Math.min(totalCount, testStart + testWindow),
+      trainWindow: testStart,
+      testWindow: Math.min(totalCount - testStart, testWindow),
+    });
+  }
+  return folds;
 }
 
 function parseIntervalMinutes(interval) {
@@ -161,6 +207,10 @@ function safetyCheck(metrics, constraints = {}) {
   const minWinRatePct = asNumber(constraints.minWinRatePct, 45) ?? 45;
   const minProfitFactor = asNumber(constraints.minProfitFactor, 1.05) ?? 1.05;
   const minReturnPct = asNumber(constraints.minReturnPct, 0) ?? 0;
+  const minWalkForwardScore = asNumber(constraints.minWalkForwardScore, -999999);
+  const minWalkForwardFoldCount = asPositiveInt(constraints.minWalkForwardFoldCount, 0);
+  const minWalkForwardPassRate = asNumber(constraints.minWalkForwardPassRate, 0);
+  const walkForwardEnabled = constraints.walkForwardEnabled === true;
 
   const checks = {
     maxDrawdown: (asNumber(metrics.maxDrawdownPct, 9999) ?? 9999) <= maxDrawdownPctLimit,
@@ -168,6 +218,11 @@ function safetyCheck(metrics, constraints = {}) {
     minWinRate: (asNumber(metrics.winRatePct, 0) ?? 0) >= minWinRatePct,
     minProfitFactor: (asNumber(metrics.profitFactor, 0) ?? 0) >= minProfitFactor,
     minReturn: (asNumber(metrics.totalReturnPct, -9999) ?? -9999) >= minReturnPct,
+    walkForward: walkForwardEnabled
+      ? (asNumber(metrics.walkForwardScore, -999999) >= minWalkForwardScore
+        && (asNumber(metrics.walkForwardFoldCount, 0) ?? 0) >= minWalkForwardFoldCount
+        && (asNumber(metrics.walkForwardPassRate, 0) ?? 0) >= minWalkForwardPassRate)
+      : true,
   };
 
   const safe = Object.values(checks).every(Boolean);
@@ -183,6 +238,7 @@ export function simulateRiskManagedMomentum({
   minOrderNotionalKrw = 5_000,
   feeBps = 5,
   autoSellEnabled = true,
+  simulatedSlippageBps = 0,
 } = {}) {
   const rows = normalizeCandles(candles);
   if (rows.length < 30) {
@@ -210,6 +266,10 @@ export function simulateRiskManagedMomentum({
   let lossCount = 0;
   let grossProfit = 0;
   let grossLoss = 0;
+  let totalFeeKrw = 0;
+  let totalSlippageBps = 0;
+  let maxSlippageBps = 0;
+  let slippageSampleCount = 0;
 
   const equityCurve = [];
   let maxExposureKrw = 0;
@@ -218,8 +278,8 @@ export function simulateRiskManagedMomentum({
     const current = rows[index];
     const partial = rows.slice(0, index + 1).map((row) => ({
       timestamp: row.timestamp,
-      high: row.close,
-      low: row.close,
+      high: row.high,
+      low: row.low,
       close: row.close,
     }));
     const signal = engine.evaluate(partial);
@@ -227,16 +287,23 @@ export function simulateRiskManagedMomentum({
     const riskMultiplier = asNumber(signal?.metrics?.riskMultiplier, 1) ?? 1;
     const normalizedRiskMultiplier = clamp(riskMultiplier, 0.2, 3);
     const desiredOrderAmount = Math.max(1, Math.round((asNumber(baseOrderAmountKrw, 5_000) ?? 5_000) * normalizedRiskMultiplier));
+    const slippageRate = (asNumber(simulatedSlippageBps, 0) ?? 0) / 10_000;
 
     if (signal.action === "BUY") {
       let spend = Math.min(desiredOrderAmount, cash);
       if (spend >= minOrderNotionalKrw) {
-        const grossQty = spend / current.close;
+        const execPrice = current.close * (1 + slippageRate);
+        const grossQty = spend / execPrice;
         const netQty = grossQty * (1 - feeRate);
         if (netQty > 0) {
+          const slippageBps = Math.abs((execPrice - current.close) / current.close) * 10_000;
+          totalSlippageBps += slippageBps;
+          slippageSampleCount += 1;
+          maxSlippageBps = Math.max(maxSlippageBps, slippageBps);
           const totalCostBefore = avgCost * qty;
           qty += netQty;
           avgCost = qty > 0 ? (totalCostBefore + spend) / qty : 0;
+          totalFeeKrw += spend * feeRate;
           cash = Math.max(0, cash - spend);
           turnoverKrw += spend;
           buyCount += 1;
@@ -246,13 +313,19 @@ export function simulateRiskManagedMomentum({
       const holdingNotional = qty * current.close;
       let sellNotional = Math.min(desiredOrderAmount, holdingNotional);
       if (sellNotional >= minOrderNotionalKrw) {
-        let sellQty = sellNotional / current.close;
+        const execPrice = current.close * (1 - slippageRate);
+        let sellQty = sellNotional / execPrice;
         if (sellQty > qty) {
           sellQty = qty;
           sellNotional = qty * current.close;
         }
         if (sellQty > 0) {
-          const proceeds = sellNotional * (1 - feeRate);
+          const slippageBps = Math.abs((execPrice - current.close) / current.close) * 10_000;
+          totalSlippageBps += slippageBps;
+          slippageSampleCount += 1;
+          maxSlippageBps = Math.max(maxSlippageBps, slippageBps);
+          const proceeds = sellQty * execPrice * (1 - feeRate);
+          totalFeeKrw += sellQty * execPrice * feeRate;
           const costBasis = avgCost * sellQty;
           const realized = proceeds - costBasis;
           if (realized >= 0) {
@@ -304,6 +377,12 @@ export function simulateRiskManagedMomentum({
   const sharpe = retStd > 0 ? (retMean / retStd) * Math.sqrt(periodsPerYear) : 0;
   const grossLossAbs = Math.abs(grossLoss);
   const profitFactor = grossLossAbs > 0 ? grossProfit / grossLossAbs : grossProfit > 0 ? 99 : 1;
+  const realizedTradeCount = sellCount;
+  const realizedPnl = grossProfit + grossLoss;
+  const expectancyKrw = realizedTradeCount > 0 ? realizedPnl / realizedTradeCount : 0;
+  const expectancyPct = realizedTradeCount > 0
+    ? (expectancyKrw / (asNumber(initialCashKrw, 1_000_000) ?? 1_000_000)) * 100
+    : 0;
 
   const metrics = {
     initialCashKrw: asNumber(initialCashKrw, 1_000_000) ?? 1_000_000,
@@ -314,12 +393,18 @@ export function simulateRiskManagedMomentum({
     volatilityPct: retStd * 100,
     turnoverKrw,
     tradeCount: buyCount + sellCount,
+    realizedTradeCount,
+    expectancyKrw,
+    expectancyPct,
     buyCount,
     sellCount,
     winRatePct: winCount + lossCount > 0 ? (winCount / (winCount + lossCount)) * 100 : 0,
     profitFactor,
     grossProfitKrw: grossProfit,
     grossLossKrw: grossLoss,
+    totalFeeKrw,
+    avgSlippageBps: slippageSampleCount > 0 ? totalSlippageBps / slippageSampleCount : 0,
+    maxSlippageBps,
     maxExposureKrw,
     openQty: qty,
     lastPrice,
@@ -331,12 +416,140 @@ export function simulateRiskManagedMomentum({
   };
 }
 
+export function simulateWalkForwardRiskManagedMomentum({
+  candles = [],
+  strategy = {},
+  interval = "15m",
+  initialCashKrw = 1_000_000,
+  baseOrderAmountKrw = 5_000,
+  minOrderNotionalKrw = 5_000,
+  feeBps = 5,
+  autoSellEnabled = true,
+  simulatedSlippageBps = 0,
+  walkForward = {},
+} = {}) {
+  const rows = normalizeCandles(candles);
+  const trainWindow = asPositiveInt(walkForward.trainWindow, 80);
+  const testWindow = asPositiveInt(walkForward.testWindow, 40);
+  const stepWindow = asPositiveInt(walkForward.stepWindow, 30);
+  const maxFolds = asPositiveInt(walkForward.maxFolds, 0);
+
+  if (rows.length < trainWindow + testWindow || !trainWindow || !testWindow || !stepWindow) {
+    return {
+      ok: false,
+      error: "insufficient_candles_for_walk_forward",
+      metrics: null,
+      folds: [],
+    };
+  }
+
+  const folds = buildWalkForwardFolds(rows.length, {
+    trainWindow,
+    testWindow,
+    stepWindow,
+    maxFolds,
+  });
+  if (folds.length < 2) {
+    return {
+      ok: false,
+      error: "insufficient_walk_forward_folds",
+      metrics: null,
+      folds,
+    };
+  }
+
+  const foldRows = [];
+  for (const fold of folds) {
+    const train = rows.slice(0, fold.trainEnd);
+    const test = rows.slice(fold.testStart, fold.testEnd);
+    const testResult = simulateRiskManagedMomentum({
+      candles: test,
+      strategy,
+      interval,
+      initialCashKrw,
+      baseOrderAmountKrw,
+      minOrderNotionalKrw,
+      feeBps,
+      autoSellEnabled,
+      simulatedSlippageBps,
+    });
+
+    if (!testResult.ok) {
+      continue;
+    }
+
+    foldRows.push({
+      trainWindow: train.length,
+      testWindow: test.length,
+      metrics: testResult.metrics,
+      train: {
+        start: fold.trainStart,
+        end: fold.trainEnd,
+      },
+      test: {
+        start: fold.testStart,
+        end: fold.testEnd,
+      },
+      // retained for traceability in logs
+      trainSamples: train.length,
+      testSamples: test.length,
+    });
+  }
+
+  if (foldRows.length === 0) {
+    return {
+      ok: false,
+      error: "walk_forward_validation_failed",
+      metrics: null,
+      folds,
+    };
+  }
+
+  const foldReturns = foldRows.map((row) => row.metrics.totalReturnPct);
+  const foldWinRates = foldRows.map((row) => row.metrics.winRatePct);
+  const foldFee = foldRows.map((row) => row.metrics.totalFeeKrw);
+  const foldTrades = foldRows.map((row) => row.metrics.realizedTradeCount || 0);
+  const foldSlippage = foldRows.map((row) => row.metrics.avgSlippageBps || 0);
+  const foldMaxSlippage = foldRows.map((row) => row.metrics.maxSlippageBps || 0);
+
+  const averageReturnPct = safeMean(foldReturns);
+  const averageWinRatePct = safeMean(foldWinRates);
+  const averageFeeKrw = safeMean(foldFee);
+  const averageTrades = safeMean(foldTrades);
+  const minReturnPct = Math.min(...foldReturns);
+  const maxReturnPct = Math.max(...foldReturns);
+  const returnStdPct = stddev(foldReturns);
+  const passRate = foldRows.filter((row) => (row.metrics.totalReturnPct ?? -999) >= 0).length / foldRows.length;
+  const score = averageReturnPct - returnStdPct * 0.8 + averageWinRatePct * 0.1 + passRate * 10;
+
+  return {
+    ok: true,
+    metrics: {
+      foldCount: foldRows.length,
+      averageReturnPct,
+      averageWinRatePct,
+      averageFeeKrw,
+      averageTrades,
+      averageSlippageBps: safeMean(foldSlippage),
+      maxSlippageBps: foldMaxSlippage.length > 0 ? Math.max(...foldMaxSlippage) : 0,
+      minReturnPct,
+      maxReturnPct,
+      returnStdPct,
+      passRate,
+      score,
+      walkForwardEnabled: true,
+    },
+    folds: foldRows,
+  };
+}
+
 export function optimizeRiskManagedMomentum({
   candlesBySymbol = {},
   strategyBase = {},
   constraints = {},
   simulation = {},
   gridConfig = {},
+  walkForward = {},
 } = {}) {
   const grid = buildMomentumGrid(gridConfig);
   const ranked = [];
@@ -363,18 +576,68 @@ export function optimizeRiskManagedMomentum({
         baseOrderAmountKrw: simulation.baseOrderAmountKrw,
         minOrderNotionalKrw: simulation.minOrderNotionalKrw,
         feeBps: simulation.feeBps,
+        simulatedSlippageBps: simulation.simulatedSlippageBps,
         autoSellEnabled: simulation.autoSellEnabled,
       });
       if (!simulationResult.ok) {
         continue;
       }
 
-      const safety = safetyCheck(simulationResult.metrics, constraints);
-      const score = scoreCandidate(simulationResult.metrics);
+      const walkForwardResult = walkForward.enabled
+        ? simulateWalkForwardRiskManagedMomentum({
+          candles,
+          strategy,
+          interval: simulation.interval,
+          initialCashKrw: simulation.initialCashKrw,
+          baseOrderAmountKrw: simulation.baseOrderAmountKrw,
+          minOrderNotionalKrw: simulation.minOrderNotionalKrw,
+          feeBps: simulation.feeBps,
+          simulatedSlippageBps: simulation.simulatedSlippageBps,
+          autoSellEnabled: simulation.autoSellEnabled,
+          walkForward: {
+            trainWindow: walkForward.trainWindow,
+            testWindow: walkForward.testWindow,
+            stepWindow: walkForward.stepWindow,
+            maxFolds: walkForward.maxFolds,
+          },
+        })
+        : null;
+
+      const walkForwardScore = walkForward.enabled
+        ? walkForwardResult?.ok ? walkForwardResult.metrics?.score || 0 : -999999
+        : 0;
+      const score = scoreCandidate({
+        ...simulationResult.metrics,
+        walkForwardScore,
+      }) + walkForwardScore * (asNumber(walkForward.scoreWeight, 0.25) || 0.25);
+
+      const safety = safetyCheck(
+        {
+          ...simulationResult.metrics,
+          walkForwardScore,
+          walkForwardFoldCount: walkForwardResult?.metrics?.foldCount || 0,
+          walkForwardPassRate: walkForwardResult?.metrics?.passRate || 0,
+        },
+        {
+          ...constraints,
+          walkForwardEnabled: walkForward.enabled === true,
+          minWalkForwardScore: walkForward.minScore,
+          minWalkForwardFoldCount: walkForward.minFoldCount,
+          minWalkForwardPassRate: walkForward.minPassRate,
+        },
+      );
       ranked.push({
         symbol,
         strategy,
         metrics: simulationResult.metrics,
+        walkForward: walkForwardResult
+          ? {
+              ok: walkForwardResult.ok,
+              error: walkForwardResult.error || null,
+              metrics: walkForwardResult.metrics,
+              folds: walkForwardResult.folds,
+            }
+          : null,
         safety,
         score,
       });
@@ -398,6 +661,15 @@ export function optimizeRiskManagedMomentum({
     best,
     ranked,
     safeRanked,
+    walkForwardConfig: {
+      enabled: walkForward.enabled === true,
+    trainWindow: asPositiveInt(walkForward.trainWindow, 80),
+    testWindow: asPositiveInt(walkForward.testWindow, 40),
+    stepWindow: asPositiveInt(walkForward.stepWindow, 30),
+    maxFolds: asPositiveInt(walkForward.maxFolds, 0),
+    scoreWeight: asNumber(walkForward.scoreWeight, 0.25),
+    minScore: asNumber(walkForward.minScore, -999999),
+  },
     evaluatedSymbols: symbols.length,
     evaluatedCandidates: ranked.length,
     gridSize: grid.length,
@@ -407,6 +679,18 @@ export function optimizeRiskManagedMomentum({
       minWinRatePct: asNumber(constraints.minWinRatePct, 45) ?? 45,
       minProfitFactor: asNumber(constraints.minProfitFactor, 1.05) ?? 1.05,
       minReturnPct: asNumber(constraints.minReturnPct, 0) ?? 0,
+      walkForwardEnabled: walkForward.enabled === true,
+      walkForwardMinScore: asNumber(walkForward.minScore, -999999) ?? -999999,
+      walkForwardMinFoldCount: asPositiveInt(walkForward.minFoldCount, 3),
+      walkForwardMinPassRate: asNumber(walkForward.minPassRate, 0.5) ?? 0.5,
+      walkForwardConfig: {
+        enabled: walkForward.enabled === true,
+        trainWindow: asPositiveInt(walkForward.trainWindow, 80),
+        testWindow: asPositiveInt(walkForward.testWindow, 40),
+        stepWindow: asPositiveInt(walkForward.stepWindow, 30),
+        maxFolds: asPositiveInt(walkForward.maxFolds, 0),
+        scoreWeight: asNumber(walkForward.scoreWeight, 0.25),
+      },
     },
   };
 }

@@ -13,6 +13,7 @@ export class TraditionalRiskEngine {
     const amountKrw = asNumber(input.amountKrw, 0);
     const side = String(input.side || "buy").toLowerCase();
     const openOrdersCount = asNumber(input.openOrdersCount, 0);
+    const openOrdersBySymbol = asNumber(input.openOrdersBySymbol, openOrdersCount);
     const exposureKrw = asNumber(input.exposureKrw, 0);
     const availableCashKrw = asNumber(input.availableCashKrw, 0);
     const dailyPnlKrw = asNumber(input.dailyPnlKrw, 0);
@@ -34,6 +35,13 @@ export class TraditionalRiskEngine {
       reasons.push({
         rule: "MAX_OPEN_ORDERS",
         detail: `${openOrdersCount} >= ${limits.maxOpenOrders}`,
+      });
+    }
+
+    if (openOrdersBySymbol >= limits.maxOpenOrdersPerSymbol) {
+      reasons.push({
+        rule: "MAX_OPEN_ORDERS_PER_SYMBOL",
+        detail: `${openOrdersBySymbol} >= ${limits.maxOpenOrdersPerSymbol}`,
       });
     }
 
@@ -97,6 +105,7 @@ export class TraditionalRiskEngine {
         openOrdersCount,
         exposureKrw,
         projectedExposureKrw,
+        openOrdersBySymbol,
         dailyPnlKrw,
         holdingNotionalKrw,
       },

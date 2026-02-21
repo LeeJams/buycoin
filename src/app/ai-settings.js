@@ -4,6 +4,19 @@ import { normalizeSymbol } from "../config/defaults.js";
 import { nowIso } from "../lib/time.js";
 
 const ALLOWED_STRATEGY_NAMES = new Set(["risk_managed_momentum", "breakout"]);
+
+// Safe ranges for strategy parameters per README AI Operator Contract.
+// Values outside these ranges silently break strategy behavior (e.g. momentumEntryBps>30 disables buying).
+const STRATEGY_SAFE_RANGES = {
+  momentumLookback:         { min: 12,   max: 72   },
+  volatilityLookback:       { min: 48,   max: 144  },
+  momentumEntryBps:         { min: 6,    max: 30   },
+  momentumExitBps:          { min: 4,    max: 20   },
+  targetVolatilityPct:      { min: 0.30, max: 1.20 },
+  riskManagedMinMultiplier: { min: 0.40, max: 1.00 },
+  riskManagedMaxMultiplier: { min: 1.20, max: 2.50 },
+};
+
 const ALLOWED_INTERVALS = new Set([
   "1m",
   "3m",
@@ -18,6 +31,26 @@ const ALLOWED_INTERVALS = new Set([
   "month",
 ]);
 const ALLOWED_DECISION_MODES = new Set(["rule", "filter", "override"]);
+
+function clampRange(value, min, max, fallback, label, logger = null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return value;
+  }
+  const clamped = Math.min(Math.max(value, min), max);
+  if (clamped !== value && logger) {
+    logger.warn("ai settings: value clamped", {
+      field: label,
+      received: value,
+      clamped,
+      min,
+      max,
+    });
+  }
+  return clamped;
+}
 
 function toBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") {
@@ -250,7 +283,7 @@ export class AiSettingsSource {
       autoSellEnabled: toBoolean(base.autoSellEnabled, true),
       sellAllOnExit: toBoolean(base.sellAllOnExit, true),
       sellAllQtyPrecision: toPositiveInt(base.sellAllQtyPrecision, 8),
-      baseOrderAmountKrw: toPositiveNumber(base.baseOrderAmountKrw, 5_000),
+      baseOrderAmountKrw: toPositiveNumber(base.baseOrderAmountKrw, 20_000),
     };
   }
 
@@ -340,6 +373,32 @@ export class AiSettingsSource {
       windowSec: toPositiveInt(executionRaw.windowSec, defaults.windowSec),
       cooldownSec: toNonNegativeInt(executionRaw.cooldownSec, defaults.cooldownSec),
     };
+    const riskMinOrder = toPositiveNumber(this.config?.risk?.minOrderNotionalKrw, 20_000);
+    const riskMaxOrder = toPositiveNumber(this.config?.risk?.maxOrderNotionalKrw, 300_000);
+    execution.orderAmountKrw = clampRange(
+      execution.orderAmountKrw,
+      riskMinOrder,
+      riskMaxOrder,
+      execution.orderAmountKrw,
+      "execution.orderAmountKrw",
+      this.logger,
+    );
+    execution.windowSec = clampRange(
+      execution.windowSec,
+      5,
+      86_400,
+      execution.windowSec,
+      "execution.windowSec",
+      this.logger,
+    );
+    execution.cooldownSec = clampRange(
+      execution.cooldownSec,
+      0,
+      600,
+      execution.cooldownSec,
+      "execution.cooldownSec",
+      this.logger,
+    );
     const symbols = toSymbolArray(executionRaw.symbols, defaults.symbols || [execution.symbol]);
     if (execution.symbol && !symbols.includes(execution.symbol)) {
       symbols.unshift(execution.symbol);
@@ -373,12 +432,39 @@ export class AiSettingsSource {
       baseOrderAmountKrw: toPositiveNumber(strategyRaw.baseOrderAmountKrw, strategyDefaults.baseOrderAmountKrw),
     };
 
+    for (const [field, range] of Object.entries(STRATEGY_SAFE_RANGES)) {
+      const value = strategy[field];
+      if (typeof value !== "number") continue;
+      const clamped = Math.max(range.min, Math.min(range.max, value));
+      if (clamped !== value) {
+        this.logger.warn("ai settings: strategy parameter out of safe range, clamping", {
+          field,
+          received: value,
+          clamped,
+          safeMin: range.min,
+          safeMax: range.max,
+        });
+        strategy[field] = clamped;
+      }
+    }
+
     const controls = {
       killSwitch: this.applyKillSwitch ? toBoolean(raw?.controls?.killSwitch, null) : null,
     };
 
     const overlay = this.applyOverlay ? normalizeOverlay(raw.overlay) : null;
     const decision = normalizeDecision(decisionRaw, decisionDefaults);
+    if (decision.forceAmountKrw !== null) {
+      decision.forceAmountKrw = clampRange(
+        decision.forceAmountKrw,
+        Math.max(riskMinOrder, execution.orderAmountKrw * 0.1),
+        execution.orderAmountKrw * 50,
+        decision.forceAmountKrw,
+        "decision.forceAmountKrw",
+        this.logger,
+      );
+    }
+
     return {
       source: "ai_settings_file",
       loadedAt: nowIso(),

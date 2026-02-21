@@ -194,6 +194,14 @@ export class BithumbClient {
     return typeof error.status === "number" && error.status >= 500;
   }
 
+  shouldUseFallbackEndpoint(error) {
+    if (!error || !Number.isFinite(error.status)) {
+      return false;
+    }
+
+    return new Set([400, 404, 405, 422]).has(error.status);
+  }
+
   emitRequestEvent(event) {
     if (!this.onRequestEvent) {
       return;
@@ -409,7 +417,7 @@ export class BithumbClient {
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
+      if (!this.shouldUseFallbackEndpoint(error)) {
         throw error;
       }
       return fallback();
@@ -444,7 +452,7 @@ export class BithumbClient {
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
+      if (!this.shouldUseFallbackEndpoint(error)) {
         throw error;
       }
       return fallback();
@@ -514,7 +522,7 @@ export class BithumbClient {
           _lookupSource: path,
         };
       } catch (error) {
-        if (error.status === 400 || error.status === 404 || error.status === 422) {
+        if (this.shouldUseFallbackEndpoint(error)) {
           lastError = error;
           continue;
         }
@@ -703,7 +711,7 @@ export class BithumbClient {
             };
           }
         } catch (error) {
-          if (error.status === 400 || error.status === 404 || error.status === 422) {
+          if (this.shouldUseFallbackEndpoint(error)) {
             continue;
           }
           throw error;
@@ -753,7 +761,7 @@ export class BithumbClient {
       try {
         return await this.lookupOrderByPaths(query);
       } catch (error) {
-        if (error.status === 400 || error.status === 404 || error.status === 422) {
+        if (this.shouldUseFallbackEndpoint(error)) {
           lastError = error;
           continue;
         }
@@ -839,7 +847,7 @@ export class BithumbClient {
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
+      if (!this.shouldUseFallbackEndpoint(error)) {
         throw error;
       }
       return fallback();
@@ -874,7 +882,7 @@ export class BithumbClient {
     try {
       return await primary();
     } catch (error) {
-      if (error.status !== 404 && error.status !== 405 && error.status !== 422) {
+      if (!this.shouldUseFallbackEndpoint(error)) {
         throw error;
       }
       return fallback();

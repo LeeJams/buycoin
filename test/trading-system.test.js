@@ -56,17 +56,36 @@ class ExchangeMock {
   }
 }
 
+// Candle fixtures for realtime tests.
+// Default interval is 15m = 900000 ms. Periods: 0, 900000, 1800000 = quarters 1-3.
+// Tick timestamps 2700000+ land in period 2700000 (quarter 4) — after all historical candles.
+const REALTIME_CANDLES_BUY = [
+  { timestamp: 0, open: 93, high: 95, low: 90, close: 95 },
+  { timestamp: 900000, open: 94, high: 96, low: 91, close: 96 },
+  { timestamp: 1800000, open: 95, high: 97, low: 92, close: 97 },
+];
+// Highest high = 105 so ticks at price 100 do NOT trigger breakout-up (100 < 105).
+const REALTIME_CANDLES_HOLD = [
+  { timestamp: 0, open: 101, high: 105, low: 100, close: 102 },
+  { timestamp: 900000, open: 100, high: 104, low: 99, close: 101 },
+  { timestamp: 1800000, open: 99, high: 103, low: 98, close: 100 },
+];
+
 class MarketDataMock {
+  constructor(candles = null) {
+    this._candles = candles || [
+      { timestamp: 1, high: 100, low: 90, close: 95 },
+      { timestamp: 2, high: 101, low: 91, close: 96 },
+      { timestamp: 3, high: 102, low: 92, close: 97 },
+      { timestamp: 4, high: 103, low: 93, close: 104 },
+    ];
+  }
+
   async getCandles() {
     return {
       symbol: "BTC_KRW",
       interval: "15m",
-      candles: [
-        { timestamp: 1, high: 100, low: 90, close: 95 },
-        { timestamp: 2, high: 101, low: 91, close: 96 },
-        { timestamp: 3, high: 102, low: 92, close: 97 },
-        { timestamp: 4, high: 103, low: 93, close: 104 },
-      ],
+      candles: this._candles,
       raw: [],
     };
   }
@@ -266,16 +285,18 @@ test("stream ticker collects realtime ticks from websocket client", async () => 
 test("strategy realtime executes buy from websocket ticks", async () => {
   const config = await createConfig();
   const exchange = new ExchangeMock();
+  // Ticks land in period 2700000 (quarter 4), after historical candles at 0/900000/1800000.
+  // Prices 95-97 don't break out (highest historical high = 97); price 104 does.
   const wsClient = new WsClientMock([
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 95, streamType: "REALTIME", timestamp: 1 },
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 96, streamType: "REALTIME", timestamp: 2 },
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 97, streamType: "REALTIME", timestamp: 3 },
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 104, streamType: "REALTIME", timestamp: 4 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 95, streamType: "REALTIME", timestamp: 2700000 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 96, streamType: "REALTIME", timestamp: 2700001 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 97, streamType: "REALTIME", timestamp: 2700002 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 104, streamType: "REALTIME", timestamp: 2700003 },
   ]);
 
   const system = new TradingSystem(config, {
     exchangeClient: exchange,
-    marketData: new MarketDataMock(),
+    marketData: new MarketDataMock(REALTIME_CANDLES_BUY),
     overlayEngine: new OverlayMock(),
     wsClient,
   });
@@ -297,16 +318,18 @@ test("strategy realtime executes buy from websocket ticks", async () => {
 test("strategy realtime can execute AI override decision without signal trigger", async () => {
   const config = await createConfig();
   const exchange = new ExchangeMock();
+  // HOLD_HISTORY has highest high = 105, so price 100 never triggers breakout-up.
+  // Only the AI override BUY should fire (once, then consumed).
   const wsClient = new WsClientMock([
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 1 },
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 2 },
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 3 },
-    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 4 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 2700000 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 2700001 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 2700002 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 2700003 },
   ]);
 
   const system = new TradingSystem(config, {
     exchangeClient: exchange,
-    marketData: new MarketDataMock(),
+    marketData: new MarketDataMock(REALTIME_CANDLES_HOLD),
     overlayEngine: new OverlayMock(),
     wsClient,
   });
@@ -331,6 +354,103 @@ test("strategy realtime can execute AI override decision without signal trigger"
   assert.equal(exchange.placeCalls[0].side, "buy");
   assert.equal(exchange.placeCalls[0].amountKrw, 9000);
   assert.equal(result.data.decisions[0].actionSource, "ai_override");
+});
+
+test("strategy realtime does not consume force-once override on non-actionable sell", async () => {
+  const config = await createConfig();
+  const exchange = new ExchangeMock();
+  // All ticks land in period 2700000. With pre-loaded history, every tick has enough
+  // candles to evaluate; the override SELL is attempted each time but skipped (no position).
+  // The override is NOT consumed (no actual order placed), verifying forceOnce is only
+  // consumed when an order is successfully attempted.
+  const wsClient = new WsClientMock([
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 100, streamType: "REALTIME", timestamp: 2700000 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 99, streamType: "REALTIME", timestamp: 2700001 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 98, streamType: "REALTIME", timestamp: 2700002 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 97, streamType: "REALTIME", timestamp: 2700003 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 97.5, streamType: "REALTIME", timestamp: 2700004 },
+  ]);
+
+  const system = new TradingSystem(config, {
+    exchangeClient: exchange,
+    marketData: new MarketDataMock(REALTIME_CANDLES_BUY),
+    overlayEngine: new OverlayMock(),
+    wsClient,
+  });
+  await system.init();
+
+  const result = await system.runStrategyRealtime({
+    symbol: "BTC_KRW",
+    durationSec: 1,
+    cooldownSec: 0,
+    dryRun: false,
+    executionPolicy: {
+      mode: "override",
+      forceAction: "SELL",
+      forceAmountKrw: 5000,
+      forceOnce: true,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.attemptedOrders, 0);
+  assert.equal(result.data.successfulOrders, 0);
+  assert.equal(exchange.placeCalls.length, 0);
+  // With pre-loaded history every tick is evaluated; all decisions are override SELL
+  // skipped due to no position — confirming forceOnce is never consumed.
+  assert.ok(result.data.decisions.length >= 1);
+  assert.equal(result.data.decisions.every((row) => row.actionSource === "ai_override"), true);
+  assert.equal(result.data.decisions.every((row) => row.skipped === "no_position"), true);
+});
+
+test("realtime respects open-order cap with stale ACCEPTED state", async () => {
+  const config = await createConfig({
+    RISK_MAX_OPEN_ORDERS: "1",
+  });
+  const exchange = new ExchangeMock();
+  // HOLD_HISTORY (highest=105) keeps the signal neutral for prices 95-98,
+  // so only the AI override BUY fires — it should succeed (ACCEPTED order is not open).
+  const wsClient = new WsClientMock([
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 95, streamType: "REALTIME", timestamp: 2700000 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 96, streamType: "REALTIME", timestamp: 2700001 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 97, streamType: "REALTIME", timestamp: 2700002 },
+    { symbol: "BTC_KRW", market: "KRW-BTC", tradePrice: 98, streamType: "REALTIME", timestamp: 2700003 },
+  ]);
+
+  const system = new TradingSystem(config, {
+    exchangeClient: exchange,
+    marketData: new MarketDataMock(REALTIME_CANDLES_HOLD),
+    overlayEngine: new OverlayMock(),
+    wsClient,
+  });
+  await system.init();
+
+  await system.store.update((state) => {
+    state.orders.push({
+      id: "stale-open",
+      state: "ACCEPTED",
+      symbol: "BTC_KRW",
+      clientOrderKey: "legacy",
+    });
+    return state;
+  });
+
+  const result = await system.runStrategyRealtime({
+    symbol: "BTC_KRW",
+    durationSec: 1,
+    cooldownSec: 0,
+    dryRun: false,
+    executionPolicy: {
+      mode: "override",
+      forceAction: "BUY",
+      forceAmountKrw: 9000,
+      forceOnce: true,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(exchange.placeCalls.length, 1);
+  assert.equal(result.data.successfulOrders, 1);
 });
 
 test("orderList forwards uuids/states options to exchange listOrders", async () => {
@@ -381,7 +501,7 @@ test("keep-latest retention keeps open orders and latest snapshots", async () =>
 
   const next = system.applyStateRetention({
     orders: [
-      { id: "open-1", state: "ACCEPTED", clientOrderKey: "k-open" },
+      { id: "open-1", state: "NEW", clientOrderKey: "k-open" },
       { id: "closed-1", state: "FILLED", clientOrderKey: "k-1" },
       { id: "closed-2", state: "CANCELED", clientOrderKey: "k-2" },
     ],

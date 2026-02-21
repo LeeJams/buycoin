@@ -154,7 +154,7 @@ Default schema:
     "enabled": true,
     "symbol": "BTC_KRW",
     "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
-    "orderAmountKrw": 5000,
+    "orderAmountKrw": 20000,
     "windowSec": 300,
     "cooldownSec": 30
   },
@@ -173,7 +173,7 @@ Default schema:
     "autoSellEnabled": true,
     "sellAllOnExit": true,
     "sellAllQtyPrecision": 8,
-    "baseOrderAmountKrw": 5000
+    "baseOrderAmountKrw": 20000
   },
   "decision": {
     "mode": "filter",
@@ -264,6 +264,18 @@ AI acts as a **strategy/policy supervisor**, not as a per-tick execution engine.
 | `overlay.multiplier` | Positive multiplier; final size is still bounded by risk engine |
 | `controls.killSwitch` | `true` means immediate trading halt behavior |
 
+Strategy parameter safe ranges and what happens if violated:
+
+| Field | Safe Range | Effect if violated |
+| --- | --- | --- |
+| `strategy.momentumLookback` | 12–72 | `<12`: noise-reactive signals; `>72`: too slow to react to regime change |
+| `strategy.volatilityLookback` | 48–144 | `<48`: unstable volatility estimate causes erratic position sizing; `>144`: ignores recent regime change |
+| `strategy.momentumEntryBps` | 6–30 | **`>30`: entry becomes nearly impossible — system effectively stops buying.** A value of 100–300 does not mean "be cautious", it means "never enter". |
+| `strategy.momentumExitBps` | 4–20 | `<4`: exits on every micro-dip, cutting profitable positions early; `>20`: holds too long into reversals |
+| `strategy.targetVolatilityPct` | 0.30–1.20 | Outliers distort the position sizing multiplier unpredictably |
+| `strategy.riskManagedMinMultiplier` | 0.40–1.00 | — |
+| `strategy.riskManagedMaxMultiplier` | 1.20–2.50 | `>2.50`: excessive size amplification in high-momentum periods |
+
 ### Propagation Timing
 
 - AI updates are not applied per tick.
@@ -320,6 +332,9 @@ Run this loop every 30-60 minutes.
    - every symbol format is `BASE_KRW`
    - `execution.symbols` is a subset of `.trader/market-universe.json`
    - `execution.orderAmountKrw` respects risk/env limits
+   - `strategy.momentumEntryBps` is in range 6–30 (if >30, buying is effectively disabled)
+   - `strategy.volatilityLookback` >= 48 and `strategy.momentumLookback` >= 12
+   - if `decision.allowBuy=false`, confirm it is intentional and add a meaningful `note` explaining why
 
 ### AI No-Do Rules
 
@@ -327,6 +342,10 @@ Run this loop every 30-60 minutes.
 - Do not write orders directly; only write policy/settings snapshot.
 - Do not use symbols outside `.trader/market-universe.json` unless explicitly force-included by env.
 - Do not disable sells globally while holdings exist, unless kill switch policy requires full freeze.
+- Do NOT use `decision.allowBuy=false` as a substitute for conservative parameter tuning. `allowBuy=false` is a hard block for genuine emergencies (technical issues, extreme market events). For bearish markets, lower `overlay.multiplier` or raise `momentumEntryBps` within safe range instead.
+- Do NOT set `momentumEntryBps` above 30. Values like 100–300 bps do not mean "be cautious" — they mean "never enter". If the intent is to avoid buying, use `allowBuy=false` with a clear `note`.
+- Do NOT set `volatilityLookback` below 48 or `momentumLookback` below 12. Short lookbacks produce noisy, unreliable signals.
+- Do NOT use both `allowBuy=false` AND `momentumEntryBps > 30` simultaneously. This creates a redundant double-block that makes it easy to forget one is still active when the other is cleared.
 
 ## Curated Market Universe
 

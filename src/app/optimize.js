@@ -40,6 +40,11 @@ function compressCandidate(candidate) {
   if (!candidate) {
     return null;
   }
+
+  const walkForward = candidate.walkForward && candidate.walkForward.ok
+    ? candidate.walkForward.metrics
+    : null;
+
   return {
     symbol: candidate.symbol,
     strategy: candidate.strategy,
@@ -50,6 +55,11 @@ function compressCandidate(candidate) {
       totalReturnPct: roundNum(candidate.metrics.totalReturnPct, 4),
       maxDrawdownPct: roundNum(candidate.metrics.maxDrawdownPct, 4),
       sharpe: roundNum(candidate.metrics.sharpe, 4),
+      expectancyKrw: roundNum(candidate.metrics.expectancyKrw, 4),
+      expectancyPct: roundNum(candidate.metrics.expectancyPct, 4),
+      totalFeeKrw: roundNum(candidate.metrics.totalFeeKrw, 2),
+      avgSlippageBps: roundNum(candidate.metrics.avgSlippageBps, 4),
+      maxSlippageBps: roundNum(candidate.metrics.maxSlippageBps, 4),
       winRatePct: roundNum(candidate.metrics.winRatePct, 4),
       profitFactor: roundNum(candidate.metrics.profitFactor, 4),
       tradeCount: candidate.metrics.tradeCount,
@@ -57,6 +67,17 @@ function compressCandidate(candidate) {
       sellCount: candidate.metrics.sellCount,
       turnoverKrw: roundNum(candidate.metrics.turnoverKrw, 2),
       finalEquityKrw: roundNum(candidate.metrics.finalEquityKrw, 2),
+      walkForward: walkForward
+        ? {
+            foldCount: walkForward.foldCount,
+            averageReturnPct: roundNum(walkForward.averageReturnPct, 4),
+            averageWinRatePct: roundNum(walkForward.averageWinRatePct, 4),
+            averageSlippageBps: roundNum(walkForward.averageSlippageBps, 4),
+            maxSlippageBps: roundNum(walkForward.maxSlippageBps, 4),
+            passRate: roundNum(walkForward.passRate, 4),
+            score: roundNum(walkForward.score, 4),
+          }
+        : null,
     },
   };
 }
@@ -174,6 +195,9 @@ export async function optimizeAndApplyBest({
       minWinRatePct: runtimeConfig.optimizer.minWinRatePct,
       minProfitFactor: runtimeConfig.optimizer.minProfitFactor,
       minReturnPct: runtimeConfig.optimizer.minReturnPct,
+      minWalkForwardFoldCount: runtimeConfig.optimizer.walkForwardMinFoldCount,
+      minWalkForwardPassRate: runtimeConfig.optimizer.walkForwardMinPassRate,
+      minWalkForwardScore: runtimeConfig.optimizer.walkForwardMinScore,
     },
     simulation: {
       interval: runtimeConfig.optimizer.interval,
@@ -181,6 +205,7 @@ export async function optimizeAndApplyBest({
       baseOrderAmountKrw: runtimeConfig.optimizer.baseOrderAmountKrw,
       minOrderNotionalKrw: runtimeConfig.optimizer.minOrderNotionalKrw,
       feeBps: runtimeConfig.optimizer.feeBps,
+      simulatedSlippageBps: runtimeConfig.optimizer.backtestSlippageBps,
       autoSellEnabled: runtimeConfig.strategy.autoSellEnabled !== false,
     },
     gridConfig: {
@@ -191,6 +216,17 @@ export async function optimizeAndApplyBest({
       targetVolatilityPctCandidates: runtimeConfig.optimizer.targetVolatilityPctCandidates,
       rmMinMultiplierCandidates: runtimeConfig.optimizer.rmMinMultiplierCandidates,
       rmMaxMultiplierCandidates: runtimeConfig.optimizer.rmMaxMultiplierCandidates,
+    },
+    walkForward: {
+      enabled: runtimeConfig.optimizer.walkForwardEnabled,
+      minScore: runtimeConfig.optimizer.walkForwardMinScore,
+      minFoldCount: runtimeConfig.optimizer.walkForwardMinFoldCount,
+      minPassRate: runtimeConfig.optimizer.walkForwardMinPassRate,
+      trainWindow: runtimeConfig.optimizer.walkForwardTrainWindow,
+      testWindow: runtimeConfig.optimizer.walkForwardTestWindow,
+      stepWindow: runtimeConfig.optimizer.walkForwardStepWindow,
+      maxFolds: runtimeConfig.optimizer.walkForwardMaxFolds,
+      scoreWeight: runtimeConfig.optimizer.walkForwardScoreWeight,
     },
   });
 
@@ -208,6 +244,7 @@ export async function optimizeAndApplyBest({
     mode: "live",
     interval: runtimeConfig.optimizer.interval,
     candleCount: runtimeConfig.optimizer.candleCount,
+    walkForward: optimization.walkForwardConfig || null,
     symbols: Object.keys(candlesBySymbol),
     evaluatedSymbols: optimization.evaluatedSymbols,
     evaluatedCandidates: optimization.evaluatedCandidates,

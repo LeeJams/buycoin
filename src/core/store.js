@@ -189,7 +189,15 @@ export class StateStore {
 
   getOpenOrders() {
     return this.state.orders.filter((order) =>
-      ["NEW", "ACCEPTED", "PARTIAL", "CANCEL_REQUESTED", "UNKNOWN_SUBMIT"].includes(order.state),
+      [
+        "NEW",
+        "PARTIAL",
+        "WAIT",
+        "WATCH",
+        "ACCEPTED",
+        "CANCEL_REQUESTED",
+        "UNKNOWN_SUBMIT",
+      ].includes(order.state),
     );
   }
 
