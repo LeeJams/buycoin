@@ -234,8 +234,8 @@ export function simulateRiskManagedMomentum({
   strategy = {},
   interval = "15m",
   initialCashKrw = 1_000_000,
-  baseOrderAmountKrw = 5_000,
-  minOrderNotionalKrw = 5_000,
+  baseOrderAmountKrw = 20_000,
+  minOrderNotionalKrw = 20_000,
   feeBps = 5,
   autoSellEnabled = true,
   simulatedSlippageBps = 0,
@@ -286,7 +286,10 @@ export function simulateRiskManagedMomentum({
 
     const riskMultiplier = asNumber(signal?.metrics?.riskMultiplier, 1) ?? 1;
     const normalizedRiskMultiplier = clamp(riskMultiplier, 0.2, 3);
-    const desiredOrderAmount = Math.max(1, Math.round((asNumber(baseOrderAmountKrw, 5_000) ?? 5_000) * normalizedRiskMultiplier));
+    const desiredOrderAmount = Math.max(
+      1,
+      Math.round((asNumber(baseOrderAmountKrw, 20_000) ?? 20_000) * normalizedRiskMultiplier),
+    );
     const slippageRate = (asNumber(simulatedSlippageBps, 0) ?? 0) / 10_000;
 
     if (signal.action === "BUY") {
@@ -421,8 +424,8 @@ export function simulateWalkForwardRiskManagedMomentum({
   strategy = {},
   interval = "15m",
   initialCashKrw = 1_000_000,
-  baseOrderAmountKrw = 5_000,
-  minOrderNotionalKrw = 5_000,
+  baseOrderAmountKrw = 20_000,
+  minOrderNotionalKrw = 20_000,
   feeBps = 5,
   autoSellEnabled = true,
   simulatedSlippageBps = 0,

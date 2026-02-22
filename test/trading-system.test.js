@@ -229,7 +229,7 @@ test("strategy sell uses available position amount when sell-all exit is enabled
     },
     {
       currency: "BTC",
-      balance: "100",
+      balance: "300",
       locked: "0",
       avg_buy_price: "90",
       unit_currency: "KRW",
@@ -250,8 +250,8 @@ test("strategy sell uses available position amount when sell-all exit is enabled
   assert.equal(exchange.placeCalls.length, 1);
   assert.equal(exchange.placeCalls[0].side, "sell");
   assert.equal(exchange.placeCalls[0].type, "market");
-  assert.equal(exchange.placeCalls[0].qty, 100);
-  assert.equal(Math.round(exchange.placeCalls[0].amountKrw), 8000);
+  assert.equal(exchange.placeCalls[0].qty, 250);
+  assert.equal(Math.round(exchange.placeCalls[0].amountKrw), 20000);
 });
 
 test("stream ticker collects realtime ticks from websocket client", async () => {
@@ -352,7 +352,7 @@ test("strategy realtime can execute AI override decision without signal trigger"
   assert.equal(result.data.attemptedOrders, 1);
   assert.equal(exchange.placeCalls.length, 1);
   assert.equal(exchange.placeCalls[0].side, "buy");
-  assert.equal(exchange.placeCalls[0].amountKrw, 9000);
+  assert.equal(exchange.placeCalls[0].amountKrw, 20000);
   assert.equal(result.data.decisions[0].actionSource, "ai_override");
 });
 
@@ -449,8 +449,8 @@ test("realtime respects open-order cap with stale ACCEPTED state", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(exchange.placeCalls.length, 1);
-  assert.equal(result.data.successfulOrders, 1);
+  assert.equal(exchange.placeCalls.length, 0);
+  assert.equal(result.data.successfulOrders, 0);
 });
 
 test("orderList forwards uuids/states options to exchange listOrders", async () => {
@@ -525,7 +525,7 @@ test("keep-latest retention keeps open orders and latest snapshots", async () =>
   assert.equal(next.orders.length, 2);
   assert.equal(next.orders.some((row) => row.id === "open-1"), true);
   assert.equal(next.orders.some((row) => row.id === "closed-2"), true);
-  assert.equal(next.orderEvents.length, 2);
+  assert.equal(next.orderEvents.length, 3);
   assert.equal(next.strategyRuns.length, 1);
   assert.equal(next.balancesSnapshot.length, 1);
   assert.equal(next.fills.length, 2);

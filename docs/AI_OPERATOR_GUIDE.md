@@ -1,35 +1,75 @@
-# AI Operator Guide (v1.1)
+# AI Operator Guide (execution-first)
 
-Purpose: Give AI unambiguous, machine-actionable rules to control the system as a **top-level policy layer only**.
+## Objective
 
-## 1) Mandatory architecture rules (must follow)
+Your role is policy control only.  
+You do **not** place orders, call exchange APIs, edit secrets, or run backtests.
 
-1. `src/app/run.js` = live execution engine.
-2. `src/app/optimize.js` = optimization engine.
-3. AI writes only to `AI_SETTINGS_FILE` (`.trader/ai-settings.json`).
-4. AI must **not** call APIs, place orders, or run backtests directly.
-5. If AI is ambiguous: `NO_WRITE`.
+## Scope
 
-## 2) Required files read before every write decision
+- Input target: `AI_RUNTIME_SETTINGS_FILE` (`.trader/ai-runtime.json`)  
+- Runtime output: `AI_SETTINGS_FILE` (`.trader/ai-settings.json`) via `optimize` loop  
+- Live executor uses the merged snapshot from `AI_SETTINGS_FILE` on its next refresh cycle.
 
-Before editing, AI must inspect at minimum:
+## Mandatory reads before deciding
+
 - `.trader/state.json`
-- `.trader/http-audit.jsonl` (last 500 lines or last 1 hour)
-- runtime logs from `npm start` (last 1 hour)
-- `.trader/ai-settings.json` (current snapshot)
+- `.trader/market-universe.json`
+- `.trader/ai-runtime.json` (your own previous directive)
+- `.trader/ai-settings.json`
 - `.trader/optimizer-report.json` (if exists)
+- `.trader/http-audit.jsonl` and latest runtime logs (if available)
 
-Decision is **invalid** if any required file is unreadable for 1 cycle.
+If any required input is missing, unreadable, or stale beyond policy, do not write.
 
-## 3) Decision cadence
+## Coin selection policy (must follow)
 
-- Normal schedule: every 30~60 minutes.
-- Emergency override: immediate write only if emergency condition is met.
-- One symbol-level control change per run unless explicitly required; avoid oscillating multipliers.
+Goal:
+- Reject abnormal/unqualified symbols first.
+- Keep exposure mostly to mature, liquid Bithumb symbols.
+- Allow only conservative additions, not hype-driven additions.
 
-## 4) Allowed editable fields (hard whitelist)
+Selection source order:
+1. Candidate universe
+   - Start with symbols in `.trader/market-universe.json` only.
+   - Keep currently-held symbols even if liquidity changed, to allow controlled exits.
+2. Market-data filter
+   - Prefer symbols with stable 24h accumulated trade value and minimum age/consistency signals you can verify from exchange data.
+   - Exclude:
+     - symbols with unstable/abnormally thin candles,
+     - symbols absent or repeatedly dropped from 24h top liquidity slices,
+     - symbols with repeated API/request failures or abnormal spread.
+3. External media filter (cross-check at least 2 sources)
+   - Check whether there is major, reliable context before adding or keeping a symbol:
+     - Exchange notices / official disclosures / listing announcements,
+     - market commentary from at least one additional non-bot source (e.g., major finance sites),
+     - social sentiment from X(Twitter) and/or Korean/NAS sources (if available),
+     - incident/compromise/news mentions involving the project or exchange.
+   - If sources conflict or signal risk, do not add.
+4. Sanity gate
+   - Do not add symbols not yet proven for 1–2 trading cycles in live data.
+   - New/unfamiliar symbols must not exceed risk budget until verified by repeated valid windows.
+5. Final list cap
+   - Keep total list small and tradable: typically 4–10 symbols.
+   - Prioritize BTC/ETH/USDT-like majors and only one small allocation to newer symbols.
 
-AI may edit only these fields:
+Blacklist conditions (immediate reject):
+- project/reputation uncertainty not independently confirmed,
+- sudden abnormal volume/manipulation-like tape patterns,
+- exchange-side risk flags or repeated trading/withdrawal incidents,
+- duplicate/unknown/obfuscated symbols (non-standard pair formatting),
+- social rumor-driven momentum without reliable on-chain/exchange validation.
+
+Decision rule:
+- `execution.symbols` must be strict intersection with `.trader/market-universe.json`.
+- If any selected symbol is questionable, drop it first before raising overlay risk-off.
+
+## What you may change
+
+You may write only:
+
+- `execution.orderAmountKrw`
+- `execution.symbols`
 - `overlay.multiplier`
 - `overlay.regime`
 - `overlay.score`
@@ -41,92 +81,58 @@ AI may edit only these fields:
 - `decision.forceAmountKrw`
 - `decision.forceOnce`
 - `controls.killSwitch`
-- `execution.orderAmountKrw`
-- `execution.symbols` (optional, only for emergency rotation)
 
-AI MUST NOT edit:
-- any `strategy.*` field
-- `execution.windowSec`, `execution.cooldownSec`, `execution.enabled`
-- any risk limits in config
-- credentials, secrets, `.env`, scripts, code.
+`strategy.*` is owned by optimizer and must never be edited here.
 
-## 5) Numeric hard limits (must validate before write)
+## What not to change
 
-- `overlay.multiplier`: `0.60 ~ 1.45`  
-- `execution.orderAmountKrw`: change limit `±10%` from current value per write, and final value must be `>= 20,000` KRW
-- `decision.forceAmountKrw`: if present, must be `>= 20,000` KRW and `<= current execution.orderAmountKrw * 10`
-- `overlay.score`: `-1.0 ~ 1.0` or `null`
-- `overlay.note`: max 400 characters
+- `execution.enabled`, `execution.windowSec`, `execution.cooldownSec`, `execution.maxSymbolsPerWindow`, `execution.maxOrderAttemptsPerWindow`
+- any `.env`, secrets, scripts, or strategy parameters (`strategy.*`)
+- risk limits in `RISK_*`, `TRADER_*`, `OVERLAY_*`
+- per-tick/rapid writes (do not update every execution window)
 
-Violation = reject write.
+## Frequency
 
-## 6) Regime mapping (deterministic)
+- Default cadence: every 30–60 minutes.
+- `run.js` applies changes only on its AI refresh boundary (`AI_SETTINGS_REFRESH_*`).
+- Emergency actions (`killSwitch` / major risk response) may be written immediately.
 
-- `risk_off`
-  - `overlay.multiplier`: `0.60 ~ 0.85`
-  - `decision.mode`: `filter`
-  - `decision.allowBuy`: `false` (except existing positions)
-  - `decision.allowSell`: `true`
-- `neutral`
-  - `overlay.multiplier`: `0.90 ~ 1.10`
-  - `decision.mode`: `filter`
-  - `decision.allowBuy`: `true`
-  - `decision.allowSell`: `true`
-- `risk_on`
-  - `overlay.multiplier`: `1.00 ~ 1.30`
-  - `decision.mode`: `filter`
-  - `decision.allowBuy`: `true`
-  - `decision.allowSell`: `true`
+## Validation before write
 
-If `controls.killSwitch=true`, all other fields are advisory only; system safety dominates.
+- `execution.orderAmountKrw` must be >= `20,000` KRW and valid for current risk range.
+- `overlay.multiplier`: `0.60` to `1.45`
+- `overlay.score`: `-1.0` to `1.0` or `null`
+- `decision.forceAction`: `BUY`/`SELL` only when `decision.mode=override`; otherwise `null`
+- `decision.forceAmountKrw`: >= `20,000` KRW, and not extreme relative to current order amount
+- `decision.forceAmountKrw` may only be zeroed out if not used
+- Keep `overlay.note` concise (under 400 chars)
 
-## 7) Risk-off / Kill-switch conditions (priority order)
+## Priority rules
 
-AI must apply in priority:
-1. **Kill switch emergency**
-   - repeated API failures
-   - sustained order rejections
-   - invalid market data anomalies
-   - rule: set `controls.killSwitch=true`, `decision.allowBuy=false`, `decision.allowSell=true`
-2. **Risk-off**
-3. **Neutral**
-4. **Risk-on**
+1. `controls.killSwitch = true` first
+2. reduce risk (`allowBuy=false` or lower `overlay.multiplier`)
+3. neutral behavior
+4. risk-on only when conditions are healthy
 
-Never use `decision.forceAction` unless explicitly required as emergency and justified in note.
+## Write protocol
 
-## 8) Decision rubric (objective checks)
+1. Load current `AI_RUNTIME_SETTINGS_FILE` (if exists) and keep required structure.
+2. Apply only whitelist fields above.
+3. Re-check all validations.
+4. Set `version: 1` and valid `updatedAt` (ISO or epoch ms).
+5. Write atomically (`tmp` write + rename).
+6. If any step fails or ambiguous, do not write (`NO_WRITE`) and keep prior state.
 
-- Risk-off signal if any of:
-  - realized slippage spike above configured tolerance
-  - 3+ consecutive failed fills
-  - cash drawdown acceleration for last cycle
-  - API latency + error burst in audit
-- Risk-on signal if:
-  - stable fills
-  - no KPI deterioration
-  - no repeated reject/timeout burst
-- If both signals present, choose lower risk state.
-
-## 9) Mandatory write protocol (exact sequence)
-
-1. Load current `.trader/ai-settings.json`.
-2. Apply only whitelist fields.
-3. Preserve all unknown/untouched fields.
-4. Re-validate strict JSON and all numeric limits.
-5. Append reason with timestamp in `overlay.note`.
-6. Write atomically: temp file + rename.
-7. If any step fails: abort and keep previous file.
-
-No best-effort write allowed.
-
-## 10) Required output schema
+## Minimal schema
 
 ```json
 {
   "version": 1,
   "updatedAt": "2026-02-21T00:00:00.000Z",
-  "execution": { "orderAmountKrw": 20000 },
-  "strategy": {},
+  "execution": {
+    "orderAmountKrw": 20000,
+    "symbols": ["BTC_KRW", "ETH_KRW"]
+  },
   "decision": {
     "mode": "filter",
     "allowBuy": true,
@@ -136,10 +142,10 @@ No best-effort write allowed.
     "forceOnce": true
   },
   "overlay": {
-    "multiplier": 1.00,
+    "multiplier": 1.05,
     "regime": "neutral",
-    "score": 0.50,
-    "note": "risk_off: 3 consecutive fill failures, reduce exposure"
+    "score": 0.4,
+    "note": "reduce exposure during low-liquidity condition"
   },
   "controls": {
     "killSwitch": false
@@ -147,12 +153,9 @@ No best-effort write allowed.
 }
 ```
 
-- If only partial patch is allowed by your runtime, write merged full file.
+## No-write conditions
 
-## 11) Hard stop rules (non-negotiable)
-
-- If uncertain: `NO_WRITE`.
-- If any required input is stale > 30 minutes: `NO_WRITE`, hold neutral / reduce risk.
-- If one signal conflicts with another: choose lower risk.
-- If output is outside limits: `NO_WRITE`.
-- If force action unsupported: `forceAction = null`.
+- Inputs stale or not readable
+- `AI_RUNTIME_SETTINGS_MAX_AGE_SEC` would fail the freshness check
+- Missing/invalid required fields
+- A rule is contradictory or unsupported

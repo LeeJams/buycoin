@@ -178,6 +178,15 @@ function trimTail(rows, limit) {
   return rows.length > cap ? rows.slice(-cap) : rows;
 }
 
+function stripOrderRecordForStorage(orderRecord) {
+  if (!orderRecord || typeof orderRecord !== "object") {
+    return orderRecord;
+  }
+  const safeOrderRecord = { ...orderRecord };
+  delete safeOrderRecord.raw;
+  return safeOrderRecord;
+}
+
 function signalRiskMultiplier(signal, config) {
   const suggested = asNumber(signal?.metrics?.riskMultiplier, null);
   if (suggested === null || suggested <= 0) {
@@ -186,6 +195,21 @@ function signalRiskMultiplier(signal, config) {
   const min = asNumber(config?.strategy?.riskManagedMinMultiplier, 0.1);
   const max = asNumber(config?.strategy?.riskManagedMaxMultiplier, 3);
   return Math.max(min, Math.min(max, suggested));
+}
+
+function clampOrderAmountByRiskLimits(amount, riskConfig = {}) {
+  const requested = asPositiveNumber(amount, null);
+  if (requested === null) {
+    return null;
+  }
+
+  const maxOrder = asPositiveNumber(riskConfig?.maxOrderNotionalKrw, requested);
+  const minOrder = asPositiveNumber(riskConfig?.minOrderNotionalKrw, 1);
+
+  if (Number.isFinite(maxOrder) && maxOrder > 0) {
+    return Math.max(minOrder, Math.min(requested, maxOrder));
+  }
+  return Math.max(minOrder, requested);
 }
 
 function requiredCandleWindow(config) {
@@ -534,6 +558,8 @@ function normalizeExchangeOrderId(response = null) {
 
 function normalizeOrderFromExchange(response, existing = {}) {
   const payload = toOrderPayload(response);
+  const safeExisting = { ...(existing || {}) };
+  delete safeExisting.raw;
   const state = normalizeOrderStateFromExchange(response) || normalizeOrderStateFromExchange(payload) || existing.state || "UNKNOWN_SUBMIT";
   const sideToken = String(payload.side || payload.order_side || existing.side || "").trim().toLowerCase();
   const side = sideToken === "ask" ? "sell" : sideToken === "bid" ? "buy" : existing.side || "buy";
@@ -557,7 +583,7 @@ function normalizeOrderFromExchange(response, existing = {}) {
   const exchangeOrderId = normalizeExchangeOrderId(payload);
 
   return {
-    ...existing,
+    ...safeExisting,
     id: existing.id,
     state,
     side,
@@ -572,7 +598,6 @@ function normalizeOrderFromExchange(response, existing = {}) {
     exchangeOrderId: exchangeOrderId || existing.exchangeOrderId || null,
     fee,
     clientOrderKey: existing.clientOrderKey || payload.identifier || null,
-    raw: response,
     updatedAt: nowIso(),
   };
 }
@@ -606,7 +631,6 @@ function fillRowsFromOrder(orderRecord) {
     createdAt: nowIso(),
     eventTs: Date.now(),
     source: "exchange_reconcile",
-    raw: orderRecord.raw || null,
   }];
 }
 
@@ -732,8 +756,228 @@ function normalizeRuntimeStrategy(input = {}, fallback = {}) {
       ? base.sellAllOnExit !== false
       : Boolean(strategy.sellAllOnExit),
     sellAllQtyPrecision: asPositiveInt(strategy.sellAllQtyPrecision, asPositiveInt(base.sellAllQtyPrecision, 8)),
-    baseOrderAmountKrw: asPositiveNumber(strategy.baseOrderAmountKrw, asPositiveNumber(base.baseOrderAmountKrw, 5_000)),
+    baseOrderAmountKrw: asPositiveNumber(strategy.baseOrderAmountKrw, asPositiveNumber(base.baseOrderAmountKrw, 20_000)),
   };
+}
+
+function compactExecutionKpi(raw = null) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const source = raw.source || "unknown";
+  return {
+    recordedAt: raw.recordedAt || nowIso(),
+    window: raw.window,
+    source,
+    mode: raw.mode || "unknown",
+    windowSymbols: Array.isArray(raw.symbols)
+      ? raw.symbols.length
+      : Number.isFinite(raw.windowSymbols)
+        ? raw.windowSymbols
+        : null,
+    symbolCount: raw.symbolCount ?? null,
+    amountKrw: raw.amountKrw ?? null,
+    tickCount: raw.tickCount ?? 0,
+    buySignals: raw.buySignals ?? 0,
+    sellSignals: raw.sellSignals ?? 0,
+    attemptedOrders: raw.attemptedOrders ?? 0,
+    successfulOrders: raw.successfulOrders ?? 0,
+    kpiGuard: {
+      enabled: Boolean(raw.kpiGuard?.enabled),
+      triggered: Boolean(raw.kpiGuard?.triggered),
+      reasons: Array.isArray(raw.kpiGuard?.reasons) ? raw.kpiGuard.reasons : [],
+      consecutiveViolations: raw.kpiGuardConsecutiveViolations ?? 0,
+    },
+    executionKpi: raw.executionKpi
+      ? {
+        dryRun: Boolean(raw.executionKpi.dryRun),
+        fills: {
+          count: raw.executionKpi.fills?.count ?? 0,
+          buyCount: raw.executionKpi.fills?.buyCount ?? 0,
+          sellCount: raw.executionKpi.fills?.sellCount ?? 0,
+          totalAmountKrw: raw.executionKpi.fills?.totalAmountKrw ?? 0,
+          totalFeeKrw: raw.executionKpi.fills?.totalFeeKrw ?? 0,
+          avgSignedSlippageBps: raw.executionKpi.fills?.avgSignedSlippageBps ?? 0,
+          avgAbsSlippageBps: raw.executionKpi.fills?.avgAbsSlippageBps ?? 0,
+        },
+        realized: {
+          tradeCount: raw.executionKpi.realized?.tradeCount ?? 0,
+          wins: raw.executionKpi.realized?.wins ?? 0,
+          losses: raw.executionKpi.realized?.losses ?? 0,
+          breakEven: raw.executionKpi.realized?.breakEven ?? 0,
+          winRatePct: raw.executionKpi.realized?.winRatePct ?? 0,
+          expectancyKrw: raw.executionKpi.realized?.expectancyKrw ?? 0,
+          realizedPnlKrw: raw.executionKpi.realized?.realizedPnlKrw ?? 0,
+        },
+        positionsTracked: raw.executionKpi.positionsTracked ?? null,
+      }
+      : null,
+  };
+}
+
+function resolveExecutionKpiHistoryRetention(config) {
+  const executionHistoryRetention = asPositiveInt(
+    config?.runtime?.retention?.executionKpiHistory,
+    null,
+  );
+  if (executionHistoryRetention !== null) {
+    return executionHistoryRetention;
+  }
+  return asPositiveInt(config?.execution?.kpiMonitorSummaryMaxEntries, 240);
+}
+
+function resolveExecutionKpiHistoryShardDays(config) {
+  return asPositiveInt(config?.runtime?.retention?.executionKpiHistoryShardDays, 7);
+}
+
+function normalizeExecutionKpiHistoryRows(rawHistory = null) {
+  const rows = [];
+  const pushCompact = (row) => {
+    const compact = compactExecutionKpi(row);
+    if (!compact) {
+      return;
+    }
+    rows.push({
+      ...compact,
+      recordedAt: compact.recordedAt || nowIso(),
+    });
+  };
+
+  if (rawHistory == null) {
+    return rows;
+  }
+
+  if (Array.isArray(rawHistory)) {
+    for (const row of rawHistory) {
+      pushCompact(row);
+    }
+    return rows;
+  }
+
+  if (typeof rawHistory !== "object") {
+    return rows;
+  }
+
+  if (Array.isArray(rawHistory.rows)) {
+    for (const row of rawHistory.rows) {
+      pushCompact(row);
+    }
+  }
+  if (Array.isArray(rawHistory.entries)) {
+    for (const row of rawHistory.entries) {
+      pushCompact(row);
+    }
+  }
+  if (Array.isArray(rawHistory.shards)) {
+    for (const shard of rawHistory.shards) {
+      const shardRows = Array.isArray(shard?.rows)
+        ? shard.rows
+        : Array.isArray(shard?.entries)
+          ? shard.entries
+          : Array.isArray(shard?.items)
+            ? shard.items
+            : [];
+      for (const row of shardRows) {
+        pushCompact(row);
+      }
+    }
+  }
+
+  return rows;
+}
+
+function normalizeExecutionKpiHistoryBucketKey(recordedAt = null) {
+  const parsedMs = Date.parse(String(recordedAt || ""));
+  if (!Number.isFinite(parsedMs)) {
+    return nowIso().slice(0, 10);
+  }
+  return new Date(parsedMs).toISOString().slice(0, 10);
+}
+
+function compactExecutionKpiHistory(rawHistory = null, options = {}) {
+  const maxEntries = asPositiveInt(options?.maxEntries, 240);
+  const maxShardDays = asPositiveInt(options?.maxShardDays, 7);
+  const nowMs = Date.now();
+
+  const rows = normalizeExecutionKpiHistoryRows(rawHistory).map((row) => ({
+    ...row,
+    __recordedAtMs: Number.isFinite(Date.parse(row.recordedAt || ""))
+      ? Date.parse(row.recordedAt || "")
+      : nowMs,
+  }));
+
+  const cutoffMs = maxShardDays > 0
+    ? nowMs - Math.max(0, maxShardDays - 1) * 24 * 60 * 60 * 1000
+    : null;
+  const activeRows = cutoffMs === null
+    ? rows
+    : rows.filter((row) => row.__recordedAtMs >= cutoffMs);
+
+  activeRows.sort((a, b) => (a.__recordedAtMs || 0) - (b.__recordedAtMs || 0));
+
+  const buckets = new Map();
+  for (const row of activeRows) {
+    const bucket = normalizeExecutionKpiHistoryBucketKey(row.recordedAt);
+    const existing = buckets.get(bucket);
+    if (existing) {
+      existing.push(row);
+    } else {
+      buckets.set(bucket, [row]);
+    }
+  }
+
+  let orderedBuckets = Array.from(buckets.keys()).sort();
+  if (maxShardDays > 0) {
+    orderedBuckets = orderedBuckets.slice(-Math.max(1, maxShardDays));
+  }
+
+  const perBucketLimit = Math.max(1, Math.floor(maxEntries / Math.max(1, orderedBuckets.length)));
+  const compactedRows = [];
+  for (const bucket of orderedBuckets) {
+    const bucketRows = trimTail(buckets.get(bucket) || [], perBucketLimit).map((row) => ({
+      ...row,
+    }));
+    compactedRows.push(...bucketRows);
+  }
+
+  const finalRows = trimTail(compactedRows, maxEntries).map((row) => {
+    const next = { ...row };
+    delete next.__recordedAtMs;
+    return next;
+  });
+
+  const shardRows = new Map();
+  for (const row of finalRows) {
+    const bucket = normalizeExecutionKpiHistoryBucketKey(row.recordedAt);
+    const existing = shardRows.get(bucket);
+    if (existing) {
+      existing.push(row);
+    } else {
+      shardRows.set(bucket, [row]);
+    }
+  }
+
+  const shards = Array.from(shardRows.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([bucket, items]) => ({
+      bucket,
+      rows: items,
+    }));
+
+  return {
+    v: 1,
+    shardDays: maxShardDays,
+    maxEntries,
+    shards,
+  };
+}
+
+function compactExecutionKpiHistoryFromState(rawHistory = null, config = {}) {
+  return compactExecutionKpiHistory(rawHistory, {
+    maxEntries: resolveExecutionKpiHistoryRetention(config),
+    maxShardDays: resolveExecutionKpiHistoryShardDays(config),
+  });
 }
 
 export class TradingSystem {
@@ -765,26 +1009,43 @@ export class TradingSystem {
     return next;
   }
 
-  applyStateRetention(state) {
+    applyStateRetention(state) {
     const retention = this.config?.runtime?.retention || {};
     if (retention.keepLatestOnly) {
       const openStates = openOrderStates();
       const orders = Array.isArray(state.orders) ? state.orders : [];
-      const openOrders = orders.filter((order) => openStates.has(order?.state));
+      const nowMs = Date.now();
+      const pruneUnknownSubmitMs = asNumber(retention.pruneUnknownSubmitMs, 0);
+      const unknownSubmitWindowMs = Number.isFinite(pruneUnknownSubmitMs)
+        ? Math.max(0, Math.floor(pruneUnknownSubmitMs))
+        : 0;
+      const openOrders = orders.filter((order) => {
+        if (!openStates.has(order?.state)) {
+          return false;
+        }
+        if (order?.state === "UNKNOWN_SUBMIT" && unknownSubmitWindowMs > 0) {
+          const placedMs = Date.parse(order?.placedAt || "");
+          if (Number.isFinite(placedMs) && nowMs - placedMs > unknownSubmitWindowMs) {
+            return false;
+          }
+        }
+        return true;
+      });
       const closedOrders = orders.filter((order) => !openStates.has(order?.state));
       const keepClosedOrders = trimTail(closedOrders, retention.closedOrders);
 
       const compactOrders = [];
       const seenOrderKey = new Set();
       for (const order of [...openOrders, ...keepClosedOrders]) {
-        const key = order?.id || order?.exchangeOrderId || order?.clientOrderKey || null;
+        const safeOrder = stripOrderRecordForStorage(order);
+        const key = safeOrder?.id || safeOrder?.exchangeOrderId || safeOrder?.clientOrderKey || null;
         if (key && seenOrderKey.has(key)) {
           continue;
         }
         if (key) {
           seenOrderKey.add(key);
         }
-        compactOrders.push(order);
+        compactOrders.push(safeOrder);
       }
       state.orders = compactOrders;
 
@@ -847,6 +1108,12 @@ export class TradingSystem {
       state.riskEvents = trimTail(state.riskEvents, riskEventsRetention);
       state.systemHealth = trimTail(state.systemHealth, systemHealthRetention);
       state.agentAudit = trimTail(state.agentAudit, agentAuditRetention);
+      if (state.system) {
+        state.system.executionKpiHistory = compactExecutionKpiHistoryFromState(
+          state.system.executionKpiHistory,
+          this.config,
+        );
+      }
       if (state.marketData && typeof state.marketData === "object") {
         state.marketData.ticks = [];
         state.marketData.candles = [];
@@ -854,11 +1121,39 @@ export class TradingSystem {
       return state;
     }
 
-    state.orders = trimTail(state.orders, retention.orders);
+    const pruneUnknownSubmitMs = asNumber(retention.pruneUnknownSubmitMs, 0);
+    const unknownSubmitWindowMs = Number.isFinite(pruneUnknownSubmitMs)
+      ? Math.max(0, Math.floor(pruneUnknownSubmitMs))
+      : 0;
+    const openStates = openOrderStates();
+    const nowMs = Date.now();
+    const filteredOrders = Array.isArray(state.orders)
+      ? state.orders.filter((order) => {
+        if (!openStates.has(order?.state)) {
+          return true;
+        }
+        if (order?.state === "UNKNOWN_SUBMIT" && unknownSubmitWindowMs > 0) {
+          const placedMs = Date.parse(order?.placedAt || "");
+          if (Number.isFinite(placedMs) && nowMs - placedMs > unknownSubmitWindowMs) {
+            return false;
+          }
+        }
+        return true;
+      })
+      : [];
+    state.orders = trimTail(filteredOrders, retention.orders).map(stripOrderRecordForStorage);
     state.orderEvents = trimTail(state.orderEvents, retention.orderEvents);
     state.strategyRuns = trimTail(state.strategyRuns, retention.strategyRuns);
     state.balancesSnapshot = trimTail(state.balancesSnapshot, retention.balancesSnapshot);
     state.fills = trimTail(state.fills, retention.fills);
+    state.system = state.system || {};
+    state.system.executionKpiHistory = compactExecutionKpiHistoryFromState(
+      state.system.executionKpiHistory,
+      this.config,
+    );
+    state.riskEvents = trimTail(state.riskEvents, asPositiveInt(retention.keepLatestOnlyRiskEvents, 100));
+    state.systemHealth = trimTail(state.systemHealth, asPositiveInt(retention.keepLatestOnlySystemHealth, 100));
+    state.agentAudit = trimTail(state.agentAudit, asPositiveInt(retention.keepLatestOnlyAgentAudit, 100));
     return state;
   }
 
@@ -874,6 +1169,10 @@ export class TradingSystem {
       if (!state.system.lastRun) {
         state.system.lastRun = null;
       }
+      state.system.executionKpiHistory = compactExecutionKpiHistoryFromState(
+        state.system.executionKpiHistory,
+        this.config,
+      );
       if (!state.settings.dailyPnlBaseline) {
         state.settings.dailyPnlBaseline = null;
       }
@@ -890,7 +1189,11 @@ export class TradingSystem {
     const openStates = openOrderStates();
     const nowMs = Date.now();
     const normalizedSymbol = symbol ? normalizeSymbol(symbol) : null;
-    const unknownSubmitStaleMs = 30 * 60 * 1000; // 30 min — UNKNOWN_SUBMIT past this age no longer blocks new orders
+    const pruneUnknownSubmitMs = asNumber(
+      this.config?.runtime?.retention?.pruneUnknownSubmitMs,
+      30 * 60 * 1000,
+    );
+    const unknownSubmitStaleMs = Math.max(0, Math.floor(pruneUnknownSubmitMs));
     return state.orders.filter((order) => {
       if (!openStates.has(order.state)) return false;
       if (normalizedSymbol) {
@@ -1032,7 +1335,10 @@ export class TradingSystem {
         overlay: state.system?.overlayCache || null,
         dailyPnlBaseline: state.settings.dailyPnlBaseline || null,
         openOrders: this.getOpenOrdersCount(),
-        executionKpi: state.system?.lastExecutionKpi || null,
+        executionKpi: compactExecutionKpi(state.system?.lastExecutionKpi || null),
+        executionKpiHistory: normalizeExecutionKpiHistoryRows(state.system?.executionKpiHistory)
+          .slice(-5)
+          .map((row) => compactExecutionKpi(row)),
         lastRun: state.system?.lastRun || null,
       },
     };
@@ -1048,11 +1354,24 @@ export class TradingSystem {
   }
 
   async recordExecutionKpi(kpi = null) {
+    const compact = compactExecutionKpi(kpi);
+    const compactRecord = compact
+      ? {
+        ...compact,
+        recordedAt: nowIso(),
+      }
+      : null;
+
     await this.store.update((state) => {
       if (!state.system) {
         state.system = {};
       }
-      state.system.lastExecutionKpi = kpi;
+      state.system.lastExecutionKpi = compact;
+      const history = normalizeExecutionKpiHistoryRows(state.system.executionKpiHistory);
+      state.system.executionKpiHistory = compactExecutionKpiHistoryFromState(
+        compactRecord ? [...history, compactRecord] : history,
+        this.config,
+      );
       return state;
     });
   }
@@ -1205,6 +1524,7 @@ export class TradingSystem {
     cooldownSec = 30,
     dryRun = false,
     executionPolicy = null,
+    maxOrderAttemptsPerWindow = 0,
   } = {}) {
     const runId = uuid();
     const normalizedSymbol = normalizeSymbol(symbol || this.config.strategy.defaultSymbol);
@@ -1263,6 +1583,8 @@ export class TradingSystem {
     let timer = null;
     let processing = Promise.resolve();
     let overrideActionConsumed = false;
+    const orderAttemptsLimit = asPositiveInt(maxOrderAttemptsPerWindow, 0);
+    const decisionTrailLimit = asPositiveInt(this.config.runtime?.retention?.strategyRunDecisions, 25);
 
     try {
       streamHandle = await this.wsClient.openTickerStream({
@@ -1341,7 +1663,25 @@ export class TradingSystem {
                   side: selectedAction === "SELL" ? "sell" : "buy",
                   skipped: "cooldown",
                 });
-                if (decisions.length > 100) {
+                while (decisions.length > decisionTrailLimit) {
+                  decisions.shift();
+                }
+                return;
+              }
+
+              if (orderAttemptsLimit > 0 && attemptedOrders >= orderAttemptsLimit) {
+                decisions.push({
+                  at: nowIso(),
+                  price: tick.tradePrice,
+                  signal: signal.action,
+                  action: selectedAction,
+                  actionSource: selectedSource,
+                  side: selectedAction === "SELL" ? "sell" : "buy",
+                  skipped: "order_attempt_cap",
+                  orderAttemptsLimit,
+                  attemptedOrders,
+                });
+                while (decisions.length > decisionTrailLimit) {
                   decisions.shift();
                 }
                 return;
@@ -1359,17 +1699,37 @@ export class TradingSystem {
                   ? 1
                   : Math.max(0.01, overlay.multiplier * signalMultiplier);
               const adjustedAmount = Math.max(1, Math.round(baseAmount * totalMultiplier));
+              const cappedAmount = clampOrderAmountByRiskLimits(adjustedAmount, this.config.risk);
               const orderSide = selectedAction === "SELL" ? "sell" : "buy";
-              let orderAmountKrw = adjustedAmount;
+              let orderAmountKrw = cappedAmount;
               let sellPlan = null;
+
+              if (!Number.isFinite(cappedAmount) || cappedAmount <= 0) {
+                decisions.push({
+                  at: nowIso(),
+                  price: tick.tradePrice,
+                  signal: signal.action,
+                  action: selectedAction,
+                  actionSource: selectedSource,
+                  side: orderSide,
+                  skipped: "order_amount_invalid_after_risk_cap",
+                  amountAdjustedKrw: adjustedAmount,
+                  amountCappedKrw: cappedAmount,
+                });
+                while (decisions.length > decisionTrailLimit) {
+                  decisions.shift();
+                }
+                return;
+              }
 
               if (orderSide === "sell") {
                 sellPlan = await this.resolveSellOrderAmount({
                   symbol: normalizedSymbol,
                   price: tick.tradePrice,
-                  fallbackAmountKrw: adjustedAmount,
+                  fallbackAmountKrw: cappedAmount,
                 });
-                orderAmountKrw = asNumber(sellPlan.amountKrw, adjustedAmount);
+                orderAmountKrw = asNumber(sellPlan.amountKrw, cappedAmount);
+                orderAmountKrw = Math.min(orderAmountKrw, cappedAmount);
                 if (!Number.isFinite(orderAmountKrw) || orderAmountKrw <= 0) {
                   if (forcedExit) {
                     await this.recordRiskEvent({
@@ -1392,7 +1752,7 @@ export class TradingSystem {
                     skipped: "no_position",
                     sellPlan,
                   });
-                  if (decisions.length > 100) {
+                  while (decisions.length > decisionTrailLimit) {
                     decisions.shift();
                   }
                   return;
@@ -1441,6 +1801,7 @@ export class TradingSystem {
                 side: orderSide,
                 amountBaseKrw: baseAmount,
                 amountAdjustedKrw: adjustedAmount,
+                amountAdjustedKrwClamped: cappedAmount !== adjustedAmount,
                 amountSubmittedKrw: orderAmountKrw,
                 overlayMultiplier: overlay.multiplier,
                 signalMultiplier,
@@ -1451,7 +1812,7 @@ export class TradingSystem {
                 orderCode: order.code,
                 error: order.ok ? null : order.error,
               });
-              if (decisions.length > 100) {
+              while (decisions.length > decisionTrailLimit) {
                 decisions.shift();
               }
             })
@@ -1935,22 +2296,23 @@ export class TradingSystem {
     await this.store.update((state) => {
       const now = nowIso();
       const nowTs = Date.now();
+      const record = stripOrderRecordForStorage(orderRecord);
       const existsIndex = state.orders.findIndex((order) => {
-        if (orderRecord?.id && order.id === orderRecord.id) {
+        if (record?.id && order.id === record.id) {
           return true;
         }
-        if (orderRecord?.exchangeOrderId && order.exchangeOrderId === orderRecord.exchangeOrderId) {
+        if (record?.exchangeOrderId && order.exchangeOrderId === record.exchangeOrderId) {
           return true;
         }
-        if (orderRecord?.clientOrderKey && order.clientOrderKey === orderRecord.clientOrderKey) {
+        if (record?.clientOrderKey && order.clientOrderKey === record.clientOrderKey) {
           return true;
         }
         return false;
       });
       const next = {
-        ...orderRecord,
-        clientOrderKey: orderRecord?.clientOrderKey || null,
-        createdAt: existsIndex >= 0 ? (state.orders[existsIndex]?.createdAt || nowIso()) : (orderRecord?.createdAt || now),
+        ...record,
+        clientOrderKey: record?.clientOrderKey || null,
+        createdAt: existsIndex >= 0 ? (state.orders[existsIndex]?.createdAt || nowIso()) : (record?.createdAt || now),
         updatedAt: now,
         metadata,
       };
@@ -1966,21 +2328,21 @@ export class TradingSystem {
 
       state.orderEvents.push({
         id: uuid(),
-        orderId: orderRecord.id,
-        eventType: orderRecord.state,
+        orderId: record.id,
+        eventType: record.state,
         eventTs: now,
         payload: {
-          symbol: orderRecord.symbol,
-          side: orderRecord.side,
-          type: orderRecord.type,
-          amountKrw: orderRecord.amountKrw,
-          exchangeOrderId: orderRecord.exchangeOrderId || null,
-          clientOrderKey: orderRecord.clientOrderKey || null,
+          symbol: record.symbol,
+          side: record.side,
+          type: record.type,
+          amountKrw: record.amountKrw,
+          exchangeOrderId: record.exchangeOrderId || null,
+          clientOrderKey: record.clientOrderKey || null,
           metadata,
         },
       });
 
-      const fills = fillRowsFromOrder(orderRecord);
+      const fills = fillRowsFromOrder(record);
       if (fills.length > 0) {
         const seenFillKeys = new Set();
         for (const fill of state.fills || []) {
@@ -2254,6 +2616,7 @@ export class TradingSystem {
       const signalMultiplier = signalRiskMultiplier(signal, this.config);
       const totalMultiplier = Math.max(0.01, overlay.multiplier * signalMultiplier);
       const adjustedAmount = Math.max(1, Math.round(baseAmount * totalMultiplier));
+      const cappedAmount = clampOrderAmountByRiskLimits(adjustedAmount, this.config.risk);
       const lastClose = asNumber(candleRes.data.candles.at(-1)?.close, null);
       const protectiveExit = await this.resolveProtectiveExit({
         symbol: normalizedSymbol,
@@ -2263,8 +2626,29 @@ export class TradingSystem {
       const reason = protectiveExit?.reason || signal.reason;
       const action = forcedExit ? protectiveExit.action : signal.action;
       const orderSide = action === "SELL" ? "sell" : "buy";
-      let submittedAmountKrw = adjustedAmount;
+      let submittedAmountKrw = cappedAmount;
       let sellPlan = null;
+      if (!Number.isFinite(cappedAmount) || cappedAmount <= 0) {
+        const result = {
+          runId,
+          signal,
+          overlay,
+          amountBaseKrw: baseAmount,
+          amountAdjustedKrw: adjustedAmount,
+          amountAdjustedKrwClamped: cappedAmount !== adjustedAmount,
+          amountSubmittedKrw: null,
+          signalMultiplier,
+          totalMultiplier,
+          protectiveExit,
+          note: "order_amount_invalid_after_risk_cap",
+        };
+        await this.finishRun(runId, "COMPLETED", { result });
+        return {
+          ok: true,
+          code: EXIT_CODES.OK,
+          data: result,
+        };
+      }
 
       if (forcedExit) {
         await this.recordRiskEvent({
@@ -2283,9 +2667,9 @@ export class TradingSystem {
         sellPlan = await this.resolveSellOrderAmount({
           symbol: normalizedSymbol,
           price: lastClose,
-          fallbackAmountKrw: adjustedAmount,
+          fallbackAmountKrw: cappedAmount,
         });
-        submittedAmountKrw = asNumber(sellPlan.amountKrw, adjustedAmount);
+        submittedAmountKrw = Math.min(asNumber(sellPlan.amountKrw, cappedAmount), cappedAmount);
       }
 
       const decision = {
@@ -2293,6 +2677,7 @@ export class TradingSystem {
         overlay,
         amountBaseKrw: baseAmount,
         amountAdjustedKrw: adjustedAmount,
+        amountAdjustedKrwClamped: cappedAmount !== adjustedAmount,
         amountSubmittedKrw: submittedAmountKrw,
         signalMultiplier,
         totalMultiplier,

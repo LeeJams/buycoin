@@ -235,6 +235,39 @@ function normalizeDecision(raw = {}, fallback = {}) {
   return decision;
 }
 
+function normalizeRuntimeMeta(raw = {}) {
+  const meta = raw && typeof raw === "object" ? raw : null;
+  if (!meta) {
+    return null;
+  }
+
+  const source = typeof meta.source === "string" && meta.source.trim() !== ""
+    ? String(meta.source).trim()
+    : null;
+  const approvedBy = typeof meta.approvedBy === "string" && meta.approvedBy.trim() !== ""
+    ? String(meta.approvedBy).trim()
+    : null;
+  const runId = meta.runId !== undefined && meta.runId !== null
+    ? String(meta.runId)
+    : null;
+  const approvedAt = toNullableNumber(meta.approvedAt);
+  const version = typeof meta.version === "string" && meta.version.trim() !== ""
+    ? String(meta.version).trim()
+    : null;
+
+  if (source === null && approvedBy === null && runId === null && approvedAt === null && version === null) {
+    return null;
+  }
+
+  return {
+    source,
+    approvedBy,
+    runId,
+    approvedAt,
+    version,
+  };
+}
+
 export class AiSettingsSource {
   constructor(config, logger) {
     this.config = config;
@@ -261,6 +294,14 @@ export class AiSettingsSource {
       orderAmountKrw: this.config.execution.orderAmountKrw,
       windowSec: this.config.execution.windowSec,
       cooldownSec: this.config.execution.cooldownSec,
+      maxSymbolsPerWindow: toPositiveInt(
+        this.config.execution.maxSymbolsPerWindow,
+        3,
+      ),
+      maxOrderAttemptsPerWindow: toPositiveInt(
+        this.config.execution.maxOrderAttemptsPerWindow,
+        1,
+      ),
     };
   }
 
@@ -304,6 +345,7 @@ export class AiSettingsSource {
     return {
       source,
       loadedAt: nowIso(),
+      meta: null,
       execution: this.defaultExecution(),
       strategy: this.defaultStrategy(),
       decision: this.defaultDecision(),
@@ -321,6 +363,7 @@ export class AiSettingsSource {
     return {
       version: 1,
       updatedAt: nowIso(),
+      meta: null,
       execution: this.defaultExecution(),
       strategy: this.defaultStrategy(),
       decision: this.defaultDecision(),
@@ -372,6 +415,8 @@ export class AiSettingsSource {
       orderAmountKrw: toPositiveNumber(executionRaw.orderAmountKrw, defaults.orderAmountKrw),
       windowSec: toPositiveInt(executionRaw.windowSec, defaults.windowSec),
       cooldownSec: toNonNegativeInt(executionRaw.cooldownSec, defaults.cooldownSec),
+      maxSymbolsPerWindow: toPositiveInt(executionRaw.maxSymbolsPerWindow, defaults.maxSymbolsPerWindow),
+      maxOrderAttemptsPerWindow: toPositiveInt(executionRaw.maxOrderAttemptsPerWindow, defaults.maxOrderAttemptsPerWindow),
     };
     const riskMinOrder = toPositiveNumber(this.config?.risk?.minOrderNotionalKrw, 20_000);
     const riskMaxOrder = toPositiveNumber(this.config?.risk?.maxOrderNotionalKrw, 300_000);
@@ -399,12 +444,35 @@ export class AiSettingsSource {
       "execution.cooldownSec",
       this.logger,
     );
-    const symbols = toSymbolArray(executionRaw.symbols, defaults.symbols || [execution.symbol]);
-    if (execution.symbol && !symbols.includes(execution.symbol)) {
-      symbols.unshift(execution.symbol);
+    execution.maxSymbolsPerWindow = clampRange(
+      execution.maxSymbolsPerWindow,
+      1,
+      20,
+      execution.maxSymbolsPerWindow,
+      "execution.maxSymbolsPerWindow",
+      this.logger,
+    );
+    execution.maxOrderAttemptsPerWindow = clampRange(
+      execution.maxOrderAttemptsPerWindow,
+      1,
+      20,
+      execution.maxOrderAttemptsPerWindow,
+      "execution.maxOrderAttemptsPerWindow",
+      this.logger,
+    );
+    const hasExplicitSymbol = executionRaw.symbol !== undefined && executionRaw.symbol !== null && String(executionRaw.symbol).trim() !== "";
+    const explicitSymbol = hasExplicitSymbol
+      ? normalizeSymbol(executionRaw.symbol)
+      : null;
+    const symbolFallback = explicitSymbol
+      ? [explicitSymbol]
+      : defaults.symbols || [execution.symbol];
+    const symbols = toSymbolArray(executionRaw.symbols, symbolFallback);
+    if (hasExplicitSymbol && explicitSymbol && !symbols.includes(explicitSymbol)) {
+      symbols.unshift(explicitSymbol);
     }
     execution.symbols = symbols.length > 0 ? symbols : [execution.symbol];
-    execution.symbol = execution.symbols[0];
+    execution.symbol = hasExplicitSymbol && explicitSymbol ? explicitSymbol : execution.symbols[0];
 
     const strategy = {
       name: normalizeStrategyName(strategyRaw.name, strategyDefaults.name),
@@ -454,6 +522,7 @@ export class AiSettingsSource {
 
     const overlay = this.applyOverlay ? normalizeOverlay(raw.overlay) : null;
     const decision = normalizeDecision(decisionRaw, decisionDefaults);
+    const meta = normalizeRuntimeMeta(raw.meta);
     if (decision.forceAmountKrw !== null) {
       decision.forceAmountKrw = clampRange(
         decision.forceAmountKrw,
@@ -468,6 +537,7 @@ export class AiSettingsSource {
     return {
       source: "ai_settings_file",
       loadedAt: nowIso(),
+      meta,
       execution,
       strategy,
       decision,

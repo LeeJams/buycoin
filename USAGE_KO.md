@@ -29,14 +29,18 @@ npm install
 
 ## AI 설정 연동(자동매매 설정 입력점)
 
-- 기본 파일: `.trader/ai-settings.json`
-- 실행 루프는 주기적으로 AI 설정 스냅샷을 갱신합니다.
-- 기본 갱신 주기: 30~60분 (`AI_SETTINGS_REFRESH_MIN_SEC=1800`, `AI_SETTINGS_REFRESH_MAX_SEC=3600`)
-- AI는 이 파일만 갱신하면 종목/주문금액/윈도우/쿨다운/킬스위치를 제어할 수 있습니다.
+- 기본 입력 파일: `.trader/ai-runtime.json` (AI가 작성)
+- 실행 반영 파일: `.trader/ai-settings.json` (optimize 출력)
+- 실행 루프는 AI 스냅샷 갱신 주기(기본 30~60분, `AI_SETTINGS_REFRESH_MIN_SEC=1800`, `AI_SETTINGS_REFRESH_MAX_SEC=3600`)로 동작합니다.
+- AI 설정 변경은 `run.js`에서 다음 AI refresh 시점에만 반영됩니다(체결 루프 1틱마다 즉시 반영되지 않음).
+- AI의 상세 제어 규칙은 `docs/AI_OPERATOR_GUIDE.md` v1.3을 준수합니다.
+- `AI_SETTINGS_REQUIRE_OPTIMIZER_APPROVAL=true`면 `optimize`가 스탬프한 스냅샷만 실제 거래에 반영됩니다.
+- `npm run optimize`는 AI 지시 파일(`.trader/ai-runtime.json`)의 `execution.symbols`가 있으면 최적화 대상 심볼로 사용합니다.
 - 동시 다중 종목 실행은 `execution.symbols` 배열(또는 콤마 문자열)로 지정합니다.
 - 요청 종목은 `.trader/market-universe.json`과 교집합으로 실행됩니다(저유동/이상 종목 자동 제외).
 - 필터 강도는 `.env`의 `MARKET_UNIVERSE_*` 값으로 조정합니다.
-- 권장 운용: AI는 30~60분 주기로 시장 점검 후 변경 필요 시에만 `ai-settings.json` 갱신
+- 권장 운용: AI는 30~60분 주기로 시장 점검 후 변경 필요 시에만 `ai-runtime.json` 갱신
+- 권장 필수 체크 입력: `.trader/state.json`, `.trader/market-universe.json`, `.trader/http-audit.jsonl`(활성 시), 런타임 로그, `.trader/optimizer-report.json`(있을 때).
 
 예시:
 
@@ -45,29 +49,9 @@ npm install
   "version": 1,
   "updatedAt": "2026-02-15T00:00:00.000Z",
   "execution": {
-    "enabled": true,
     "symbol": "USDT_KRW",
     "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
-    "orderAmountKrw": 7000,
-    "windowSec": 180,
-    "cooldownSec": 20
-  },
-  "strategy": {
-    "name": "risk_managed_momentum",
-    "defaultSymbol": "USDT_KRW",
-    "candleInterval": "15m",
-    "candleCount": 200,
-    "momentumLookback": 36,
-    "volatilityLookback": 96,
-    "momentumEntryBps": 16,
-    "momentumExitBps": 10,
-    "targetVolatilityPct": 0.35,
-    "riskManagedMinMultiplier": 0.4,
-    "riskManagedMaxMultiplier": 1.8,
-    "autoSellEnabled": true,
-    "sellAllOnExit": true,
-    "sellAllQtyPrecision": 8,
-    "baseOrderAmountKrw": 7000
+    "orderAmountKrw": 20000
   },
   "decision": {
     "mode": "filter",
@@ -80,7 +64,7 @@ npm install
       "BTC_KRW": {
         "mode": "override",
         "forceAction": "BUY",
-        "forceAmountKrw": 7000
+        "forceAmountKrw": 20000
       }
     }
   },
@@ -96,13 +80,20 @@ npm install
 }
 ```
 
+AI 입력 파일 포맷 규칙:
+
+- `AI_RUNTIME_SETTINGS_FILE`은 원자적 쓰기(`tmp` 파일 작성 후 `rename`)로 갱신해야 합니다.
+- `updatedAt`(`ISO` 또는 epoch ms)와 `version`(`1`)을 반드시 포함합니다.
+- `AI_RUNTIME_SETTINGS_MAX_AGE_SEC`를 설정하면 만료된 지시를 자동 무시합니다.
+- `strategy.*`는 `optimize` 담당이며 AI가 직접 작성하면 안 됩니다.
+
 ## 실행 명령
 
 ```bash
 npm start
 ```
 
-CLI 모드는 제거되었습니다. 설정/제어는 `.env`와 `AI_SETTINGS_FILE`로 수행합니다.
+CLI 모드는 제거되었습니다. 설정/제어는 `.env`와 `AI_RUNTIME_SETTINGS_FILE`(`.trader/ai-runtime.json`) 기반으로 수행합니다.
 
 ## 실행 규칙
 

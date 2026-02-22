@@ -66,7 +66,7 @@ function baseConfig() {
       enabled: true,
       symbol: "BTC_KRW",
       symbols: ["BTC_KRW"],
-      orderAmountKrw: 5000,
+      orderAmountKrw: 20000,
       windowSec: 1,
       cooldownSec: 1,
       restartDelayMs: 1,
@@ -155,8 +155,8 @@ test("execution service applies ai execution settings per window", async () => {
   assert.equal(system.calls.strategyApply, 1);
   assert.equal(system.calls.realtime, 1);
   assert.equal(system.calls.args[0].symbol, "USDT_KRW");
-  assert.equal(system.calls.args[0].amount, 7000);
-  assert.equal(system.calls.args[0].durationSec, 2);
+  assert.equal(system.calls.args[0].amount, 20000);
+  assert.equal(system.calls.args[0].durationSec, 5);
   assert.equal(system.calls.args[0].cooldownSec, 0);
   assert.equal(system.calls.args[0].dryRun, false);
 });
@@ -205,7 +205,7 @@ test("execution service runs multiple symbols in one window when ai settings pro
   const bySymbol = Object.fromEntries(system.calls.args.map((row) => [row.symbol, row.executionPolicy]));
   assert.equal(bySymbol.BTC_KRW.mode, "override");
   assert.equal(bySymbol.BTC_KRW.forceAction, "BUY");
-  assert.equal(bySymbol.BTC_KRW.forceAmountKrw, 6500);
+  assert.equal(bySymbol.BTC_KRW.forceAmountKrw, 20000);
   assert.equal(bySymbol.ETH_KRW.mode, "filter");
   assert.equal(bySymbol.ETH_KRW.allowBuy, false);
   assert.equal(bySymbol.ETH_KRW.allowSell, true);
@@ -265,8 +265,8 @@ test("execution service keeps ai snapshot until refresh window", async () => {
   assert.equal(system.calls.realtime, 2);
   assert.equal(system.calls.args[0].symbol, "USDT_KRW");
   assert.equal(system.calls.args[1].symbol, "USDT_KRW");
-  assert.equal(system.calls.args[0].amount, 7000);
-  assert.equal(system.calls.args[1].amount, 7000);
+  assert.equal(system.calls.args[0].amount, 20000);
+  assert.equal(system.calls.args[1].amount, 20000);
 });
 
 test("execution service applies market universe filter to requested symbols", async () => {

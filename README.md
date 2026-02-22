@@ -33,7 +33,7 @@ AI/ML role:
 - Paper mode is removed from runtime behavior and env contract.
 - `npm start` always runs live execution path.
 - If API keys are missing or account preflight fails, process exits before execution loop.
-- There is no CLI command mode; operation is daemon + file-driven settings (`.env`, `.trader/ai-settings.json`).
+- There is no CLI command mode; operation is daemon + file-driven settings (`.env`, `.trader/ai-runtime.json`, `.trader/ai-settings.json`).
 
 ## Requirements
 
@@ -57,7 +57,7 @@ Key groups:
 - Runtime: `TRADER_*`, `TZ`
 - Strategy: `STRATEGY_*` (default: risk-managed momentum)
 - Risk: `RISK_*`, `TRADER_INITIAL_CAPITAL_KRW`
-- AI bridge: `AI_SETTINGS_*` (AI writes runtime settings file)
+- AI bridge: `AI_RUNTIME_SETTINGS_FILE` (AI directives input), `AI_SETTINGS_*` (runtime snapshot output)
 - Market universe: `MARKET_UNIVERSE_*` (liquidity/quality filtered tradable symbols)
 - Overlay: `OVERLAY_*` (AI/ML cache settings)
 
@@ -83,6 +83,7 @@ npm start
 The service uses `EXECUTION_*` values from `.env` and runs realtime windows continuously.
 When enabled, it refreshes AI runtime settings snapshot from `.trader/ai-settings.json` periodically.
 Default refresh cadence is 30-60 minutes (`AI_SETTINGS_REFRESH_MIN_SEC=1800`, `AI_SETTINGS_REFRESH_MAX_SEC=3600`).
+AI directives are written to `.trader/ai-runtime.json` by external AI process; `optimize` reads this file and merges only execution/decision/overlay/controls directives into `ai-settings.json`. `strategy` is always optimizer-owned.
 It also refreshes a curated KRW market universe snapshot in `.trader/market-universe.json`.
 Symbols outside this universe are automatically filtered out from `execution.symbols`.
 You can set multi-symbol runtime defaults with `EXECUTION_SYMBOLS=BTC_KRW,ETH_KRW,USDT_KRW`.
@@ -97,6 +98,41 @@ Look for these startup logs:
 - `live preflight passed`: account/auth check succeeded
 - `execution service started`: loop is active
 - `strategy updated from ai settings` / `overlay updated from ai settings`: AI snapshot applied
+
+### 4) 운영 한 장 정리 (필수)
+
+#### 운영 1페이지 템플릿
+
+- `npm start`는 실시간 거래 데몬으로 상시 실행(`pm2`/`systemd` 운영)
+- `npm run optimize`는 외부 스케줄러(권장 cron)로 실행
+- AI/설정 반영은 `run.js`의 AI refresh 주기에서만 반영, `optimize` 실행 즉시 반영 아님
+- `npm run optimize`는 AI 지시 파일(`.trader/ai-runtime.json`)의 `execution.symbols`가 있으면 그 심볼들을 최적화 대상으로 사용
+- `TRADER_STATE_KPI_HISTORY_MAX_ENTRIES`와 `TRADER_STATE_KPI_HISTORY_SHARD_DAYS`로 상태 KPI 메타만 남김
+
+권장 운영 흐름:
+1. `npm start`를 `pm2` 또는 `systemd`로 24/7 가동
+2. `cron`으로 `npm run optimize`를 주기 실행
+3. AI는 `AI_SETTINGS_REFRESH_MIN_SEC`/`AI_SETTINGS_REFRESH_MAX_SEC` 또는 `AI_SETTINGS_REFRESH_FIXED_SEC`로 반영 주기 조정
+4. `AI_SETTINGS_APPLY_COOLDOWN_SEC`로 급격한 설정 변경 억제
+5. `AI_SETTINGS_REQUIRE_OPTIMIZER_APPROVAL=true`면 `optimize` 결과를 스탬프 받은 스냅샷만 실행 적용
+6. 상태 KPI가 비정상적으로 커지면 `TRADER_STATE_KPI_HISTORY_MAX_ENTRIES`, `TRADER_STATE_KPI_HISTORY_SHARD_DAYS`를 축소
+
+`npm run optimize` cron 템플릿(2시간 간격 예시):
+
+```bash
+0 */2 * * * cd /path/to/buycoin && /usr/bin/env npm run optimize >> /var/log/buycoin-optimize.log 2>&1
+```
+
+```text
+주의: `npm start`를 cron에 넣지 마세요.
+주의: cron은 1회 시작/중단 용도가 아니라 외부 배치 실행용입니다.
+```
+
+운영 가드:
+- `OPTIMIZER_LOCK_FILE`: `.trader/optimize.lock`
+- `OPTIMIZER_LOCK_TTL_SEC`: `900`
+- 락이 남아 있으면 다음 `optimize`는 즉시 스킵(중복 실행 방지)
+- 최적화 결과는 `.trader/ai-runtime.json` 기반으로 `.trader/ai-settings.json`에 쓰여지며, 데몬은 다음 AI refresh 시점에 반영
 
 Window summary interpretation:
 
@@ -129,7 +165,7 @@ Default strategy is `risk_managed_momentum`.
 
 ## Overlay (AI/ML Output Cache)
 
-Set by external process (AI agent, batch job, research model) in `AI_SETTINGS_FILE`.
+Set by external process (AI agent, batch job, research model) in `AI_RUNTIME_SETTINGS_FILE` (`.trader/ai-runtime.json`).
 
 Execution reads overlay with timeout guard:
 
@@ -138,42 +174,23 @@ Execution reads overlay with timeout guard:
 
 ## AI Runtime Settings File
 
-AI can control execution settings by writing `AI_SETTINGS_FILE` (default: `.trader/ai-settings.json`).
-The daemon loads an AI settings snapshot and refreshes it periodically.
+External AI writes `AI_RUNTIME_SETTINGS_FILE` (default: `.trader/ai-runtime.json`).
+`npm run optimize` merges only execution/decision/overlay/controls directives into `AI_SETTINGS_FILE` (`.trader/ai-settings.json`) each run. `strategy` fields in runtime input are ignored on merge.
+The daemon loads this merged snapshot and refreshes it periodically.
 Default refresh range is 30-60 minutes (`AI_SETTINGS_REFRESH_MIN_SEC=1800`, `AI_SETTINGS_REFRESH_MAX_SEC=3600`).
 For concurrent multi-symbol execution, set `execution.symbols` (array or comma-separated string).
 The runtime intersects requested symbols with `.trader/market-universe.json` and only executes allowed ones.
 
-Default schema:
+Default schema (AI directive format):
 
 ```json
 {
   "version": 1,
   "updatedAt": "2026-02-15T00:00:00.000Z",
   "execution": {
-    "enabled": true,
     "symbol": "BTC_KRW",
     "symbols": ["BTC_KRW", "ETH_KRW", "USDT_KRW"],
-    "orderAmountKrw": 20000,
-    "windowSec": 300,
-    "cooldownSec": 30
-  },
-  "strategy": {
-    "name": "risk_managed_momentum",
-    "defaultSymbol": "BTC_KRW",
-    "candleInterval": "15m",
-    "candleCount": 120,
-    "momentumLookback": 24,
-    "volatilityLookback": 72,
-    "momentumEntryBps": 12,
-    "momentumExitBps": 8,
-    "targetVolatilityPct": 0.6,
-    "riskManagedMinMultiplier": 0.6,
-    "riskManagedMaxMultiplier": 2.2,
-    "autoSellEnabled": true,
-    "sellAllOnExit": true,
-    "sellAllQtyPrecision": 8,
-    "baseOrderAmountKrw": 20000
+    "orderAmountKrw": 20000
   },
   "decision": {
     "mode": "filter",
@@ -186,7 +203,7 @@ Default schema:
       "BTC_KRW": {
         "mode": "override",
         "forceAction": "BUY",
-        "forceAmountKrw": 7000,
+        "forceAmountKrw": 20000,
         "forceOnce": true
       }
     }
@@ -203,12 +220,24 @@ Default schema:
 }
 ```
 
+AI runtime input safety (atomic + freshness):
+
+- `AI_RUNTIME_SETTINGS_FILE` must be written by atomic replace (`tmp` write + `rename`) to avoid partial reads.
+- If your AI process writes this file, include:
+  - `updatedAt` (ISO datetime or epoch ms)
+  - `version: 1`
+- In .env, set `AI_RUNTIME_SETTINGS_MAX_AGE_SEC` to reject stale runtime directives.
+- `AI_RUNTIME_SETTINGS_FILE` must contain only:
+  - `version`, `updatedAt`
+  - `execution`, `decision`, `overlay`, `controls`
+- `strategy.*` is optimizer-owned and **never writable** by AI.
+
 Notes:
 
 - AI settings changes are applied on the next AI snapshot refresh cycle (default 30-60 minutes), not per tick.
 - Recommended AI update cadence is every 30-60 minutes.
 - If no strategy/policy change is needed, keep the same `ai-settings.json` values.
-- `strategy.*` updates are applied safely when refreshed (signal engine is rebuilt safely).
+- `strategy.*` updates are applied by `optimize` only (signal engine is rebuilt safely).
 - Refresh cadence is configurable with `AI_SETTINGS_REFRESH_MIN_SEC` / `AI_SETTINGS_REFRESH_MAX_SEC`.
 - `decision.mode`:
   - `rule`/`filter`: execute only signal-based actions (with AI allow/deny filters)
@@ -219,6 +248,7 @@ Notes:
 ## AI Operator Contract (for OpenClaw/LLM)
 
 This section is the canonical contract for an AI that manages runtime behavior.
+For strict machine-action rules, also use `docs/AI_OPERATOR_GUIDE.md` (v1.3).
 
 ### Role
 
@@ -234,12 +264,14 @@ AI acts as a **strategy/policy supervisor**, not as a per-tick execution engine.
 
 - `.env` for hard limits and runtime configuration
 - `.trader/state.json` for latest balances/holdings/open orders/system state
+- `.trader/market-universe.json` for tradable symbol universe
+- `.trader/optimizer-report.json` for latest optimization candidate context (if exists)
 - `.trader/http-audit.jsonl` for API failures, rate-limit pressure, and latency
 - process logs (stdout/stderr) for runtime health
 
 ### Write Output (AI side)
 
-- Target file: `.trader/ai-settings.json` only
+- Target file: `.trader/ai-runtime.json` only
 - Write a full valid JSON object (`version: 1`, `updatedAt` in ISO-8601 UTC)
 - Prefer atomic replace (`tmp` write + rename) to avoid partial-file reads
 
@@ -257,32 +289,24 @@ AI acts as a **strategy/policy supervisor**, not as a per-tick execution engine.
 | `execution.enabled` | Keep `true` in normal operations; set `false` only for intentional pause |
 | `execution.symbols` | Use normalized symbols and prefer values from `.trader/market-universe.json` |
 | `execution.orderAmountKrw` | Must be positive and should satisfy exchange/risk minimum notional |
-| `strategy.name` | Use supported strategy (`risk_managed_momentum` recommended) |
 | `decision.mode` | `filter` (default), `rule`, or `override` |
 | `decision.forceAction` | Use only with `override`; value `BUY` or `SELL` |
 | `decision.forceOnce` | Keep `true` for one-shot forced action |
 | `overlay.multiplier` | Positive multiplier; final size is still bounded by risk engine |
 | `controls.killSwitch` | `true` means immediate trading halt behavior |
 
-Strategy parameter safe ranges and what happens if violated:
-
-| Field | Safe Range | Effect if violated |
-| --- | --- | --- |
-| `strategy.momentumLookback` | 12–72 | `<12`: noise-reactive signals; `>72`: too slow to react to regime change |
-| `strategy.volatilityLookback` | 48–144 | `<48`: unstable volatility estimate causes erratic position sizing; `>144`: ignores recent regime change |
-| `strategy.momentumEntryBps` | 6–30 | **`>30`: entry becomes nearly impossible — system effectively stops buying.** A value of 100–300 does not mean "be cautious", it means "never enter". |
-| `strategy.momentumExitBps` | 4–20 | `<4`: exits on every micro-dip, cutting profitable positions early; `>20`: holds too long into reversals |
-| `strategy.targetVolatilityPct` | 0.30–1.20 | Outliers distort the position sizing multiplier unpredictably |
-| `strategy.riskManagedMinMultiplier` | 0.40–1.00 | — |
-| `strategy.riskManagedMaxMultiplier` | 1.20–2.50 | `>2.50`: excessive size amplification in high-momentum periods |
+`strategy` is optimizer-owned and must not be updated through `AI_RUNTIME_SETTINGS_FILE`.
 
 ### Propagation Timing
 
 - AI updates are not applied per tick.
 - New settings are applied on next AI snapshot refresh cycle (default 30-60 minutes).
 - Refresh range is controlled by:
-  - `AI_SETTINGS_REFRESH_MIN_SEC`
-  - `AI_SETTINGS_REFRESH_MAX_SEC`
+- `AI_SETTINGS_REFRESH_MIN_SEC`
+- `AI_SETTINGS_REFRESH_MAX_SEC`
+- `AI_SETTINGS_REQUIRE_OPTIMIZER_APPROVAL` (default false): if true, only apply AI snapshots with optimizer stamp
+- `AI_SETTINGS_REFRESH_FIXED_SEC` (override fixed period, disables jitter)
+- `AI_SETTINGS_APPLY_COOLDOWN_SEC` (minimum interval between runtime applications)
 
 ### AI Runbook (What AI should do)
 
@@ -305,25 +329,16 @@ Run this loop every 30-60 minutes.
      - `risk_on`: `1.00-1.35`
    - default to `decision.mode=filter`
    - block buys per symbol when short-term momentum is clearly negative, but keep sells enabled for held coins
-4. Tune strategy within safe range
-   - `strategy.momentumLookback`: `12-72`
-   - `strategy.volatilityLookback`: `48-144`
-   - `strategy.momentumEntryBps`: `6-30`
-   - `strategy.momentumExitBps`: `4-20`
-   - `strategy.targetVolatilityPct`: `0.30-1.20`
-   - `strategy.riskManagedMinMultiplier`: `0.40-1.00`
-   - `strategy.riskManagedMaxMultiplier`: `1.20-2.50`
 5. Decide whether to write
    - if no material change, do not write file
    - material change examples:
      - `execution.symbols` changed
      - `execution.orderAmountKrw` changed by >= 10%
-     - any `strategy.*` parameter changed
      - `overlay.multiplier` changed by >= 0.05
      - `decision.*` changed
      - `controls.killSwitch` changed
 6. Write output safely
-   - update only `.trader/ai-settings.json`
+   - update only `.trader/ai-runtime.json`
    - keep `version=1`
    - set `updatedAt` to current UTC ISO timestamp
    - write with atomic replace (`tmp` file then rename)
@@ -332,8 +347,6 @@ Run this loop every 30-60 minutes.
    - every symbol format is `BASE_KRW`
    - `execution.symbols` is a subset of `.trader/market-universe.json`
    - `execution.orderAmountKrw` respects risk/env limits
-   - `strategy.momentumEntryBps` is in range 6–30 (if >30, buying is effectively disabled)
-   - `strategy.volatilityLookback` >= 48 and `strategy.momentumLookback` >= 12
    - if `decision.allowBuy=false`, confirm it is intentional and add a meaningful `note` explaining why
 
 ### AI No-Do Rules
@@ -342,7 +355,7 @@ Run this loop every 30-60 minutes.
 - Do not write orders directly; only write policy/settings snapshot.
 - Do not use symbols outside `.trader/market-universe.json` unless explicitly force-included by env.
 - Do not disable sells globally while holdings exist, unless kill switch policy requires full freeze.
-- Do NOT use `decision.allowBuy=false` as a substitute for conservative parameter tuning. `allowBuy=false` is a hard block for genuine emergencies (technical issues, extreme market events). For bearish markets, lower `overlay.multiplier` or raise `momentumEntryBps` within safe range instead.
+- Do NOT use `decision.allowBuy=false` as a substitute for normal risk throttle. `allowBuy=false` is a hard block for genuine emergencies (technical issues, extreme market events). For bearish markets, lower `overlay.multiplier` and tighten risk posture instead.
 - Do NOT set `momentumEntryBps` above 30. Values like 100–300 bps do not mean "be cautious" — they mean "never enter". If the intent is to avoid buying, use `allowBuy=false` with a clear `note`.
 - Do NOT set `volatilityLookback` below 48 or `momentumLookback` below 12. Short lookbacks produce noisy, unreliable signals.
 - Do NOT use both `allowBuy=false` AND `momentumEntryBps > 30` simultaneously. This creates a redundant double-block that makes it easy to forget one is still active when the other is cleared.
@@ -367,7 +380,7 @@ To avoid illiquid or questionable symbols while still scanning many Bithumb mark
 
 - CLI mode is intentionally removed.
 - Paper mode is intentionally removed (live-only runtime).
-- Runtime control is file-driven (`.env` + `AI_SETTINGS_FILE`).
+- Runtime control is file-driven (`.env` + `AI_RUNTIME_SETTINGS_FILE` + `AI_SETTINGS_FILE`).
 - Runtime observability is log-driven (JSON logs to stdout/stderr).
 - Runtime state is persisted in `TRADER_STATE_FILE` (default `.trader/state.json`).
 - State collections are retention-capped (see `TRADER_RETENTION_*`).
@@ -424,7 +437,8 @@ Each exchange HTTP call is logged to JSONL audit trail:
 
 Generated/used files:
 
-- `.trader/ai-settings.json`: AI supervisor input snapshot (main control file)
+- `.trader/ai-runtime.json`: external AI selector/context input file
+- `.trader/ai-settings.json`: AI runtime snapshot merged by optimize (main control output)
 - `.trader/state.json`: latest runtime state (balances snapshots, order/fill/event tails, system status)
 - `.trader/market-universe.json`: filtered tradable symbol set
 - `.trader/overlay.json`: local overlay cache store
@@ -434,6 +448,8 @@ Growth controls:
 
 - `TRADER_STATE_KEEP_LATEST_ONLY=true` keeps only latest snapshots + open orders + short closed-order tail
 - `TRADER_RETENTION_*` caps each state collection
+- `TRADER_STATE_KPI_HISTORY_MAX_ENTRIES` caps `state.system.executionKpiHistory` (요약 KPI 메타 최근 N개)
+- `TRADER_STATE_KPI_HISTORY_SHARD_DAYS` limits KPI 메타 샤드(일자) 보존 범위
 - `TRADER_HTTP_AUDIT_ENABLED=false` by default to avoid large JSONL growth in 24/7 runs
 
 ## Safety Controls

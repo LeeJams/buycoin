@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node ./src/app/run.js",
+    "optimize": "node ./src/app/optimize.js",
     "test": "node --test",
     "lint": "eslint src test scripts test-utils"
   },
