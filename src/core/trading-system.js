@@ -2613,12 +2613,29 @@ export class TradingSystem {
       const context = await this.evaluateRiskForOrder(orderInput, { chanceMinTotalKrw });
       if (!context.risk.allowed) {
         const reasons = Array.isArray(context.risk.reasons) ? context.risk.reasons : [];
+        const reasonRules = reasons.map((reason) => String(reason?.rule || "")).filter(Boolean);
         const hitDailyLossLimit = reasons.some((reason) => reason?.rule === "MAX_DAILY_LOSS_KRW");
-        const streak = await this.bumpRiskRejectStreak({
-          symbol: orderInput.symbol,
-          reasons,
-          metrics: context.risk.metrics,
-        });
+
+        const nonEscalatingSellRejectRules = new Set([
+          "MIN_ORDER_NOTIONAL_KRW",
+          "SELL_EXCEEDS_HOLDING",
+          "NO_SELLABLE_HOLDING",
+        ]);
+        const isNonEscalatingSellReject = orderInput.side === "sell"
+          && reasonRules.length > 0
+          && reasonRules.every((rule) => nonEscalatingSellRejectRules.has(rule));
+        const isKillSwitchEchoReject = reasonRules.length > 0
+          && reasonRules.every((rule) => rule === "KILL_SWITCH_ACTIVE");
+
+        const shouldEscalateRejectStreak = !isNonEscalatingSellReject && !isKillSwitchEchoReject;
+        const streak = shouldEscalateRejectStreak
+          ? await this.bumpRiskRejectStreak({
+            symbol: orderInput.symbol,
+            reasons,
+            metrics: context.risk.metrics,
+          })
+          : asNumber(this.store.snapshot().settings?.riskReject?.streak, 0);
+
         await this.recordRiskEvent({
           type: "order_rejected",
           source: "risk_engine",
@@ -2626,6 +2643,7 @@ export class TradingSystem {
           reasons,
           metrics: context.risk.metrics,
           streak,
+          nonEscalating: !shouldEscalateRejectStreak,
         });
 
         if (hitDailyLossLimit && !this.store.snapshot().settings.killSwitch) {
@@ -2639,7 +2657,10 @@ export class TradingSystem {
         }
 
         const maxRiskRejectStreak = asNumber(this.config.risk.maxConsecutiveRiskRejects, 0);
-        if (maxRiskRejectStreak > 0 && streak >= maxRiskRejectStreak && !this.store.snapshot().settings.killSwitch) {
+        if (shouldEscalateRejectStreak
+          && maxRiskRejectStreak > 0
+          && streak >= maxRiskRejectStreak
+          && !this.store.snapshot().settings.killSwitch) {
           await this.setKillSwitch(true, "max_consecutive_risk_rejects");
           this.logger.error("kill switch auto-activated by risk-reject streak", {
             symbol: orderInput.symbol,
