@@ -1349,6 +1349,34 @@ export class TradingSystem {
     });
   }
 
+  hasRecentProtectiveExit(symbol, cooldownSec = 0) {
+    const windowMs = Math.max(0, Math.floor(asNumber(cooldownSec, 0) * 1000));
+    if (!symbol || windowMs <= 0) {
+      return false;
+    }
+    const state = this.store.snapshot();
+    const events = Array.isArray(state?.riskEvents) ? state.riskEvents : [];
+    if (events.length === 0) {
+      return false;
+    }
+    const nowMs = Date.now();
+    for (let idx = events.length - 1; idx >= 0; idx -= 1) {
+      const row = events[idx];
+      if (row?.type !== "protective_exit") {
+        continue;
+      }
+      if (normalizeSymbol(row?.symbol) !== normalizeSymbol(symbol)) {
+        continue;
+      }
+      const ts = Date.parse(row?.at || "");
+      if (!Number.isFinite(ts)) {
+        continue;
+      }
+      return nowMs - ts <= windowMs;
+    }
+    return false;
+  }
+
   async resolveProtectiveExit({ symbol, currentPrice }) {
     const normalizedSymbol = normalizeSymbol(symbol || this.config.strategy.defaultSymbol);
     const [baseCurrency] = normalizedSymbol.split("_");
@@ -1366,6 +1394,12 @@ export class TradingSystem {
 
     const avgBuyPrice = asNumber(accountContext.metrics.holdingsAvgBuyPrice?.[baseCurrency], null);
     if (avgBuyPrice === null || avgBuyPrice <= 0) {
+      return null;
+    }
+
+    const holdingNotionalKrw = holdingQty * price;
+    const dustFloorKrw = asNumber(this.config?.risk?.chanceMinTotalKrw, 5_000);
+    if (Number.isFinite(holdingNotionalKrw) && holdingNotionalKrw > 0 && holdingNotionalKrw < dustFloorKrw) {
       return null;
     }
 
@@ -1763,11 +1797,17 @@ export class TradingSystem {
                 selectedSource = "ai_override";
               } else if (signal.action === "BUY") {
                 if (aiPolicy.allowBuy) {
-                  const reboundGate = evaluateReboundGate(candlesSnapshot, this.config.strategy?.rebound || {});
-                  if (reboundGate.ok) {
-                    selectedAction = "BUY";
+                  const postExitCooldownSec = asNumber(this.config?.risk?.postExitBuyCooldownSec, 0);
+                  const inPostExitCooldown = this.hasRecentProtectiveExit(normalizedSymbol, postExitCooldownSec);
+                  if (inPostExitCooldown) {
+                    selectedReason = "post_exit_buy_cooldown";
                   } else {
-                    selectedReason = reboundGate.reason || "rebound_gate_block";
+                    const reboundGate = evaluateReboundGate(candlesSnapshot, this.config.strategy?.rebound || {});
+                    if (reboundGate.ok) {
+                      selectedAction = "BUY";
+                    } else {
+                      selectedReason = reboundGate.reason || "rebound_gate_block";
+                    }
                   }
                 } else {
                   selectedReason = "ai_filter_block_buy";
@@ -2616,25 +2656,21 @@ export class TradingSystem {
         const reasonRules = reasons.map((reason) => String(reason?.rule || "")).filter(Boolean);
         const hitDailyLossLimit = reasons.some((reason) => reason?.rule === "MAX_DAILY_LOSS_KRW");
 
-        const nonEscalatingSellRejectRules = new Set([
+        const nonEscalatingRejectRules = new Set([
           "MIN_ORDER_NOTIONAL_KRW",
+          "INSUFFICIENT_CASH",
           "SELL_EXCEEDS_HOLDING",
           "NO_SELLABLE_HOLDING",
+          "KILL_SWITCH_ACTIVE",
         ]);
-        const nonEscalatingBuyRejectRules = new Set([
-          "INSUFFICIENT_CASH",
-          "MIN_ORDER_NOTIONAL_KRW",
-        ]);
-        const isNonEscalatingSellReject = orderInput.side === "sell"
-          && reasonRules.length > 0
-          && reasonRules.every((rule) => nonEscalatingSellRejectRules.has(rule));
-        const isNonEscalatingBuyReject = orderInput.side === "buy"
-          && reasonRules.length > 0
-          && reasonRules.every((rule) => nonEscalatingBuyRejectRules.has(rule));
+        // Hotfix: reject-streak 승격은 '실행 불가능한 거절'에는 적용하지 않는다.
+        // KILL_SWITCH_ACTIVE가 함께 섞여 들어온 경우도 non-escalating으로 처리한다.
+        const isNonEscalatingReject = reasonRules.length > 0
+          && reasonRules.every((rule) => nonEscalatingRejectRules.has(rule));
         const isKillSwitchEchoReject = reasonRules.length > 0
           && reasonRules.every((rule) => rule === "KILL_SWITCH_ACTIVE");
 
-        const shouldEscalateRejectStreak = !isNonEscalatingSellReject && !isNonEscalatingBuyReject && !isKillSwitchEchoReject;
+        const shouldEscalateRejectStreak = !isNonEscalatingReject && !isKillSwitchEchoReject;
         const streak = shouldEscalateRejectStreak
           ? await this.bumpRiskRejectStreak({
             symbol: orderInput.symbol,

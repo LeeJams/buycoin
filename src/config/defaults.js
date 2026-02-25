@@ -259,6 +259,7 @@ export function loadConfig(env = process.env) {
       maxHoldingTakeProfitPct: toNumber(env.RISK_MAX_HOLDING_TAKE_PROFIT_PCT, 2.2),
       trailingStopPct: toPositiveNumber(env.RISK_TRAILING_STOP_PCT, 1.2),
       trailingArmPct: toPositiveNumber(env.RISK_TRAILING_ARM_PCT, 2.2),
+      postExitBuyCooldownSec: toPositiveInt(env.RISK_POST_EXIT_BUY_COOLDOWN_SEC, 900),
       maxConsecutiveRiskRejects: toPositiveInt(env.RISK_MAX_CONSECUTIVE_RISK_REJECTS, 4),
       riskRejectResetSec: toPositiveInt(
         env.RISK_REJECT_RESET_SEC ?? env.RISK_RISK_REJECT_RESET_SEC,
