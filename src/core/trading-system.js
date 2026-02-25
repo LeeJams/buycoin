@@ -244,15 +244,16 @@ function evaluateReboundGate(candles = [], reboundConfig = {}) {
   const dropLookback = Math.max(3, Math.floor(asNumber(reboundConfig?.dropLookback, 8)));
   const dropPct = asNumber(reboundConfig?.dropPct, -2.5);
   const confirmEma = Math.max(3, Math.floor(asNumber(reboundConfig?.confirmEma, 9)));
+  const breakoutLookback = Math.max(4, Math.floor(asNumber(reboundConfig?.breakoutLookback, 6)));
 
-  if (!Array.isArray(candles) || candles.length < Math.max(dropLookback + 2, confirmEma + 2)) {
+  if (!Array.isArray(candles) || candles.length < Math.max(dropLookback + 2, confirmEma + 2, breakoutLookback + 2)) {
     return { ok: false, reason: "rebound_insufficient_candles" };
   }
 
   const closes = candles
     .map((c) => asNumber(c?.close ?? c?.tradePrice ?? c?.price, null))
     .filter((v) => Number.isFinite(v));
-  if (closes.length < Math.max(dropLookback + 2, confirmEma + 2)) {
+  if (closes.length < Math.max(dropLookback + 2, confirmEma + 2, breakoutLookback + 2)) {
     return { ok: false, reason: "rebound_invalid_closes" };
   }
 
@@ -263,19 +264,29 @@ function evaluateReboundGate(candles = [], reboundConfig = {}) {
   const dropFromPeakPct = peak > 0 ? ((last - peak) / peak) * 100 : 0;
   const emaValue = ema(closes, confirmEma);
 
-  const ok = Number.isFinite(emaValue)
+  // Case A: 급락 후 반등 진입
+  const reboundOk = Number.isFinite(emaValue)
     && dropFromPeakPct <= dropPct
     && last >= emaValue
     && last > prev;
 
-  if (!ok) {
+  // Case B: 상승 추세 지속(신고점 돌파)도 진입 허용
+  const breakoutBase = closes.slice(Math.max(0, closes.length - 1 - breakoutLookback), closes.length - 1);
+  const breakoutHigh = breakoutBase.length > 0 ? Math.max(...breakoutBase) : prev;
+  const trendBreakoutOk = Number.isFinite(emaValue)
+    && last >= emaValue
+    && last >= breakoutHigh
+    && last > prev;
+
+  if (reboundOk || trendBreakoutOk) {
     return {
-      ok: false,
-      reason: "rebound_gate_block",
+      ok: true,
+      reason: reboundOk ? "rebound_gate_pass" : "trend_breakout_pass",
       metrics: {
         dropFromPeakPct,
         dropThresholdPct: dropPct,
         ema: emaValue,
+        breakoutHigh,
         last,
         prev,
       },
@@ -283,12 +294,13 @@ function evaluateReboundGate(candles = [], reboundConfig = {}) {
   }
 
   return {
-    ok: true,
-    reason: "rebound_gate_pass",
+    ok: false,
+    reason: "rebound_gate_block",
     metrics: {
       dropFromPeakPct,
       dropThresholdPct: dropPct,
       ema: emaValue,
+      breakoutHigh,
       last,
       prev,
     },

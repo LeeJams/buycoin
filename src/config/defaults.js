@@ -191,6 +191,7 @@ export function loadConfig(env = process.env) {
         dropLookback: toPositiveInt(env.REBOUND_DROP_LOOKBACK, 8),
         dropPct: toNumber(env.REBOUND_DROP_PCT, -2.5),
         confirmEma: toPositiveInt(env.REBOUND_CONFIRM_EMA, 9),
+        breakoutLookback: toPositiveInt(env.REBOUND_BREAKOUT_LOOKBACK, 6),
         entrySplits: [0.4, 0.3, 0.3],
         stopLossPct: toPositiveNumber(env.REBOUND_STOP_LOSS_PCT, 4.8),
         tp1Pct: toPositiveNumber(env.REBOUND_TP1_PCT, 2.2),
