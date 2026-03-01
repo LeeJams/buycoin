@@ -122,16 +122,30 @@ function buildKpiReportText(input) {
       .join(" | ")
     : "none";
 
+  const successRateText = input.attempted > 0
+    ? `${((input.successful / input.attempted) * 100).toFixed(2)}%`
+    : "N/A(attempted=0)";
+  const rejectRateText = input.attempted > 0
+    ? `${((input.rejected / input.attempted) * 100).toFixed(2)}%`
+    : "N/A(attempted=0)";
+
+  const configuredSymbolsText = Array.isArray(input.executionSymbols) && input.executionSymbols.length > 0
+    ? input.executionSymbols.join(",")
+    : "none";
+
   return [
     "[코마 2시간 보고]",
     `1) 결론: ${input.decision}`,
-    `2) 실행결과: attempted=${input.attempted}, successful=${input.successful}, rejected=${input.rejected}, fills=${input.fillCount}`,
-    `3) 손익: realized=${Math.round(input.realizedPnlKrw).toLocaleString()} KRW, unrealized=${Math.round(toNum(input.mtm.unrealizedPnlKrw, 0)).toLocaleString()} KRW, winRate=${input.winRatePct}%`,
-    `4) 기준손익: baseline=${Math.round(input.baselineEquityKrw).toLocaleString()} KRW, equity=${Math.round(input.currentEquityKrw).toLocaleString()} KRW, pnl=${Math.round(input.baselinePnlKrw).toLocaleString()} KRW`,
-    `5) 포지션: KRW ${Math.round(input.mtm.krw).toLocaleString()}, ${assetsText}`,
-    `6) 실패원인 Top3: ${rejectTop}`,
-    `7) 변경값: ${input.changeSummary}`,
-    `8) 다음 점검 시각: ${input.nextCheckAtKst}`,
+    `2) 관측윈도우: ${input.windowLabel}`,
+    `3) 실행결과: attempted=${input.attempted}, successful=${input.successful}, rejected=${input.rejected}, fills=${input.fillCount}`,
+    `4) 성공률/거절률: success=${successRateText}, reject=${rejectRateText}`,
+    `5) 설정 심볼: ${configuredSymbolsText}`,
+    `6) 손익: realized=${Math.round(input.realizedPnlKrw).toLocaleString()} KRW, unrealized=${Math.round(toNum(input.mtm.unrealizedPnlKrw, 0)).toLocaleString()} KRW, winRate=${input.winRatePct}%`,
+    `7) 기준손익: baseline=${Math.round(input.baselineEquityKrw).toLocaleString()} KRW, equity=${Math.round(input.currentEquityKrw).toLocaleString()} KRW, pnl=${Math.round(input.baselinePnlKrw).toLocaleString()} KRW`,
+    `8) 포지션: KRW ${Math.round(input.mtm.krw).toLocaleString()}, ${assetsText}`,
+    `9) 실패원인 Top3: ${rejectTop}`,
+    `10) 변경값: ${input.changeSummary}`,
+    `11) 다음 점검 시각: ${input.nextCheckAtKst}`,
   ].join("\n");
 }
 
@@ -145,6 +159,8 @@ export async function generateKpiReport(baseDir = process.cwd()) {
   ]);
 
   const s = summary?.summary || {};
+  const windowSec = toNum(summary?.reportWindow?.requestedWindowSec, 0);
+  const windowLabel = windowSec > 0 ? `${Math.round(windowSec / 60)}분` : "unknown";
   const fromMs = toNum(s?.windowFromMs, 0);
   const attempted = toNum(s?.orders?.attempted, 0);
   const successful = toNum(s?.orders?.successful, 0);
@@ -189,6 +205,7 @@ export async function generateKpiReport(baseDir = process.cwd()) {
     rejectTopReasons,
     decision,
     changeSummary,
+    windowLabel,
     currentEquityKrw,
     baselineEquityKrw,
     baselinePnlKrw,
@@ -204,6 +221,8 @@ export async function generateKpiReport(baseDir = process.cwd()) {
       rejectTopReasons,
       decision,
       changeSummary,
+      windowLabel,
+      executionSymbols: aiRuntime?.execution?.symbols || [],
       currentEquityKrw,
       baselineEquityKrw,
       baselinePnlKrw,
