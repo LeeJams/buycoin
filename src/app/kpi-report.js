@@ -112,18 +112,36 @@ function extractLatestPrices(state = {}) {
   return out;
 }
 
-function summarizeMarket(universe = {}) {
+function marketChangePct(c = {}) {
+  if (Number.isFinite(toNum(c?.change24hPct, NaN))) return toNum(c.change24hPct, 0);
+  if (Number.isFinite(toNum(c?.changePct24h, NaN))) return toNum(c.changePct24h, 0);
+  if (Number.isFinite(toNum(c?.signedChangeRate, NaN))) return toNum(c.signedChangeRate, 0) * 100;
+  if (Number.isFinite(toNum(c?.changeRate, NaN))) return toNum(c.changeRate, 0) * 100;
+  return 0;
+}
+
+function summarizeMarket(universe = {}, signal = {}) {
   const candidates = Array.isArray(universe?.candidates) ? universe.candidates : [];
   if (candidates.length === 0) {
     return "시장 데이터 없음";
   }
 
-  const sortedByChange = [...candidates].sort((a, b) => toNum(b?.change24hPct, -999) - toNum(a?.change24hPct, -999));
-  const top = sortedByChange.slice(0, 3).map((c) => `${toKoreanSymbol(c.symbol)} ${toNum(c.change24hPct, 0).toFixed(1)}%`);
+  const normalized = candidates.map((c) => ({ ...c, _changePct: marketChangePct(c) }));
+  const sortedByChange = [...normalized].sort((a, b) => b._changePct - a._changePct);
+  const top = sortedByChange.slice(0, 3).map((c) => `${toKoreanSymbol(c.symbol)} ${c._changePct.toFixed(1)}%`);
 
-  const avgChange = candidates.reduce((acc, c) => acc + toNum(c?.change24hPct, 0), 0) / candidates.length;
+  const avgChange = normalized.reduce((acc, c) => acc + c._changePct, 0) / normalized.length;
+  const upCount = normalized.filter((c) => c._changePct > 0.2).length;
+  const downCount = normalized.filter((c) => c._changePct < -0.2).length;
   const tone = avgChange >= 1 ? "강세" : avgChange <= -1 ? "약세" : "혼조";
-  return `${tone} / 상위 모멘텀: ${top.join(", ")}`;
+
+  const buySignals = toNum(signal?.buySignals, 0);
+  const sellSignals = toNum(signal?.sellSignals, 0);
+  const signalHint = buySignals + sellSignals > 0
+    ? `신호 buy:${buySignals} / sell:${sellSignals}`
+    : "신호 데이터 없음";
+
+  return `${tone} (상승 ${upCount} / 하락 ${downCount}) | 상위: ${top.join(", ")} | 근거: ${signalHint}`;
 }
 
 function collectRecentTrades(state = {}, fromMs = 0, limit = 5) {
@@ -228,6 +246,7 @@ export async function generateKpiReport(baseDir = process.cwd()) {
   const successful = toNum(s?.orders?.successful, 0);
   const fillCount = toNum(s?.fills?.fillCount, 0);
   const buySignals = toNum(s?.signals?.buySignals, 0);
+  const sellSignals = toNum(s?.signals?.sellSignals, 0);
   const rejected = Math.max(0, attempted - successful);
   const realizedPnlKrw = toNum(s?.realized?.realizedPnlKrw, 0);
   const winRatePct = toNum(s?.realized?.winRatePct, 0);
@@ -236,7 +255,7 @@ export async function generateKpiReport(baseDir = process.cwd()) {
   const mtm = markToMarket(latestBalances(state), latestPrices);
   const rejectTopReasons = aggregateRejectReasons(state, fromMs, 3);
   const recentTrades = collectRecentTrades(state, fromMs, 5);
-  const marketSummary = summarizeMarket(marketUniverse);
+  const marketSummary = summarizeMarket(marketUniverse, { buySignals, sellSignals });
   const situationPlan = buildSituationPlan({ attempted, successful, buySignals, rejected });
 
   const decision = `regime=${aiRuntime?.overlay?.regime || "unknown"}, killSwitch=${Boolean(aiRuntime?.controls?.killSwitch)}`;
