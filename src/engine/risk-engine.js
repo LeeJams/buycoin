@@ -45,7 +45,12 @@ export class TraditionalRiskEngine {
       });
     }
 
-    if (amountKrw < appliedMinNotional) {
+    const isDustLiquidationSell = side === "sell"
+      && holdingNotionalKrw > 0
+      && holdingNotionalKrw <= appliedMinNotional
+      && amountKrw >= holdingNotionalKrw * 0.95;
+
+    if (amountKrw < appliedMinNotional && !isDustLiquidationSell) {
       reasons.push({
         rule: "MIN_ORDER_NOTIONAL_KRW",
         detail: `${amountKrw} < ${appliedMinNotional}`,

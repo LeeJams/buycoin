@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node ./src/app/run.js",
     "optimize": "node ./src/app/optimize.js",
+    "kpi-report": "node ./src/app/kpi-report.js",
     "test": "node --test",
     "lint": "eslint src test scripts test-utils"
   },
