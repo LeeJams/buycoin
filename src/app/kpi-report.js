@@ -142,44 +142,56 @@ function buildSituationPlan({ attempted = 0, successful = 0, buySignals = 0, rej
   return "체결 품질 유지: 과매매 억제하며 수익 구간 추적";
 }
 
+function toKoreanSymbol(symbol = "") {
+  const map = {
+    BTC_KRW: "비트코인",
+    ETH_KRW: "이더리움",
+    XRP_KRW: "리플",
+    SOL_KRW: "솔라나",
+    VIRTUAL_KRW: "버추얼",
+    HBAR_KRW: "헤데라",
+    DOGE_KRW: "도지코인",
+    WLD_KRW: "월드코인",
+    ENSO_KRW: "엔소",
+  };
+  return map[symbol] || symbol;
+}
+
 function buildKpiReportText(input) {
   const rejectTop = input.rejectTopReasons.length > 0
     ? input.rejectTopReasons.map((x) => `${x.reason} x${x.count}`).join(", ")
-    : "none";
-  const assetsText = input.mtm.assets.length > 0
-    ? input.mtm.assets
-      .map((a) => `${a.symbol} ${a.qty.toFixed(8)} @${Math.round(a.avgBuyPrice).toLocaleString()}`)
-      .join(" | ")
-    : "none";
-
+    : "없음";
   const successRateText = input.attempted > 0
-    ? `${((input.successful / input.attempted) * 100).toFixed(2)}%`
-    : "N/A(attempted=0)";
+    ? `${((input.successful / input.attempted) * 100).toFixed(1)}%`
+    : "N/A";
   const failRateText = input.attempted > 0
-    ? `${((input.rejected / input.attempted) * 100).toFixed(2)}%`
-    : "N/A(attempted=0)";
+    ? `${((input.rejected / input.attempted) * 100).toFixed(1)}%`
+    : "N/A";
 
   const configuredSymbolsText = Array.isArray(input.executionSymbols) && input.executionSymbols.length > 0
-    ? input.executionSymbols.join(",")
-    : "none";
+    ? input.executionSymbols.map((s) => toKoreanSymbol(s)).join(", ")
+    : "없음";
 
   const recentTradesText = input.recentTrades.length > 0
     ? input.recentTrades
-      .map((t) => `${t.when} ${t.side} ${t.symbol} ${Math.round(t.amountKrw).toLocaleString()}원 @${Math.round(t.price).toLocaleString()}`)
-      .join(" | ")
+      .slice(0, 3)
+      .map((t) => `${t.when} ${t.side === "BUY" ? "매수" : "매도"} ${toKoreanSymbol(t.symbol)} ${Math.round(t.amountKrw).toLocaleString()}원`)
+      .join(" / ")
     : "최근 체결 없음";
 
+  const positionText = input.mtm.assets.length > 0
+    ? input.mtm.assets.map((a) => `${toKoreanSymbol(a.symbol)} ${a.qty.toFixed(6)}`).join(", ")
+    : "보유 없음";
+
   return [
-    "[코마 2시간 보고]",
-    `1) 관측윈도우: ${input.windowLabel} / 설정심볼: ${configuredSymbolsText}`,
-    `2) 매수 시도/주문 시도: buySignals=${input.buySignals}, attempted=${input.attempted}`,
-    `3) 성공률/실패율: success=${successRateText}, fail=${failRateText} (successful=${input.successful}, rejected=${input.rejected})`,
-    `4) 최근 거래내역: ${recentTradesText}`,
-    `5) 기준손익: baseline=${Math.round(input.baselineEquityKrw).toLocaleString()} KRW, equity=${Math.round(input.currentEquityKrw).toLocaleString()} KRW, pnl=${Math.round(input.baselinePnlKrw).toLocaleString()} KRW`,
-    `6) 현재 포지션: KRW ${Math.round(input.mtm.krw).toLocaleString()}, ${assetsText}`,
-    `7) 실패원인 Top3: ${rejectTop}`,
-    `8) 현재상황/계획: ${input.situationPlan}`,
-    `9) 다음 점검 시각: ${input.nextCheckAtKst}`,
+    "[코마 요약 보고]",
+    `• 설정 코인: ${configuredSymbolsText}`,
+    `• 시도/성공/실패: ${input.attempted}/${input.successful}/${input.rejected} (성공률 ${successRateText}, 실패율 ${failRateText})`,
+    `• 최근 거래: ${recentTradesText}`,
+    `• 기준손익: ${Math.round(input.baselinePnlKrw).toLocaleString()}원 (기준 ${Math.round(input.baselineEquityKrw).toLocaleString()} → 현재 ${Math.round(input.currentEquityKrw).toLocaleString()})`,
+    `• 현재 상태: KRW ${Math.round(input.mtm.krw).toLocaleString()}원, 보유 ${positionText}`,
+    `• 실패원인: ${rejectTop}`,
+    `• 다음 계획: ${input.situationPlan}`,
   ].join("\n");
 }
 
