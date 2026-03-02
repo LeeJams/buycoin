@@ -56,6 +56,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseLockOwnerPid(raw) {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const firstLine = raw.split(/\r?\n/, 1)[0]?.trim();
+  const pid = Number(firstLine);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class StateStore {
   constructor(stateFile, options = {}) {
     this.stateFile = stateFile;
@@ -116,6 +137,7 @@ export class StateStore {
     while (true) {
       try {
         const handle = await fs.open(this.lockFile, "wx");
+        await handle.writeFile(`${process.pid}\n${Date.now()}\n`, "utf8");
         try {
           return await task();
         } finally {
@@ -143,7 +165,17 @@ export class StateStore {
 
   async recoverStaleLock() {
     try {
-      const stats = await fs.stat(this.lockFile);
+      const [stats, lockRaw] = await Promise.all([
+        fs.stat(this.lockFile),
+        fs.readFile(this.lockFile, "utf8").catch(() => ""),
+      ]);
+
+      const ownerPid = parseLockOwnerPid(lockRaw);
+      if (ownerPid && !isProcessAlive(ownerPid)) {
+        await fs.rm(this.lockFile, { force: true });
+        return true;
+      }
+
       const ageMs = Date.now() - stats.mtimeMs;
       if (ageMs < this.lockStaleMs) {
         return false;
